@@ -18,6 +18,7 @@
 #include "oneD/Domain1D.h"
 #include "oneD/Boundary1D.h"
 #include "oneD/Flow1D.h"
+#include "oneD/SprayFlow1D.h"
 #include "oneD/refine.h"
 
 #endif

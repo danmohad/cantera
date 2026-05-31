@@ -7,6 +7,7 @@
 #include "cantera/oneD/Boundary1D.h"
 #include "cantera/oneD/Flow1D.h"
 #include "cantera/oneD/IonFlow.h"
+#include "cantera/oneD/SprayFlow1D.h"
 #include "cantera/transport/Transport.h"
 
 namespace Cantera
@@ -72,6 +73,24 @@ DomainFactory::DomainFactory()
             ret = new Flow1D(solution, id);
         }
         ret->setUnstrainedFlow();
+        return ret;
+    });
+    reg("spray-free-flow", [](shared_ptr<Solution> solution, const string& id) {
+        auto ret = new SprayFlow1D(solution, id);
+        ret->setFreeFlow();
+        ret->setFreeFlowNoSlip(true);
+        return ret;
+    });
+    reg("spray-axisymmetric-flow", [](shared_ptr<Solution> solution, const string& id) {
+        auto ret = new SprayFlow1D(solution, id);
+        ret->setAxisymmetricFlow();
+        ret->setFreeFlowNoSlip(false);
+        return ret;
+    });
+    reg("spray-unstrained-flow", [](shared_ptr<Solution> solution, const string& id) {
+        auto ret = new SprayFlow1D(solution, id);
+        ret->setUnstrainedFlow();
+        ret->setFreeFlowNoSlip(false);
         return ret;
     });
 }

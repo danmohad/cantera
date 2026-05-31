@@ -43,6 +43,7 @@ void Boundary1D::_init(size_t n)
             m_flow_left = dynamic_cast<Flow1D*>(&r);
             if (m_flow_left != nullptr) {
                 m_phase_left = &m_flow_left->phase();
+                m_left_nsp = m_phase_left->nSpecies();
             }
         } else {
             throw CanteraError("Boundary1D::_init",
@@ -64,6 +65,7 @@ void Boundary1D::_init(size_t n)
             m_flow_right = dynamic_cast<Flow1D*>(&r);
             if (m_flow_right != nullptr) {
                 m_phase_right = &m_flow_right->phase();
+                m_right_nsp = m_phase_right->nSpecies();
             }
         } else {
             throw CanteraError("Boundary1D::_init",

@@ -338,6 +338,7 @@ void Flow1D::eval(size_t jGlobal, span<const double> xGlobal, span<double> rsdGl
     evalElectricField(x, rsd, diag, rdt, jmin, jmax);
     evalUo(x, rsd, diag, rdt, jmin, jmax);
     evalSpecies(x, rsd, diag, rdt, jmin, jmax);
+    evalAdditionalEquations(x, rsd, diag, rdt, jmin, jmax);
 }
 
 void Flow1D::updateProperties(size_t jg, span<const double> x, size_t jmin, size_t jmax)
@@ -539,14 +540,16 @@ void Flow1D::evalContinuity(span<const double> x, span<double> rsd, span<int> di
             // specified at the right boundary. The Lambda information propagates
             // in the opposite direction.
             rsd[index(c_offset_U, j)] = -(rho_u(x, j+1) - rho_u(x, j))/m_dz[j]
-                                        -(density(j+1)*V(x, j+1) + density(j)*V(x, j));
+                                        -(density(j+1)*V(x, j+1) + density(j)*V(x, j))
+                                        + continuitySource(x, j);
             diag[index(c_offset_U, j)] = 0; // Algebraic constraint
         }
     } else if (m_isFree) { // "free-flow"
         for (size_t j = j0; j <= j1; j++) {
             // terms involving V are zero as V=0 by definition
             if (z(j) > m_zfixed) {
-                rsd[index(c_offset_U, j)] = -(rho_u(x, j) - rho_u(x, j-1))/m_dz[j-1];
+                rsd[index(c_offset_U, j)] = -(rho_u(x, j) - rho_u(x, j-1))/m_dz[j-1]
+                                            + continuitySource(x, j);
             } else if (z(j) == m_zfixed) {
                 if (m_do_energy[j]) {
                     rsd[index(c_offset_U, j)] = (T(x, j) - m_tfixed);
@@ -554,13 +557,15 @@ void Flow1D::evalContinuity(span<const double> x, span<double> rsd, span<int> di
                     rsd[index(c_offset_U, j)] = (rho_u(x, j) - m_rho[0]*0.3); // why 0.3?
                 }
             } else { // z(j) < m_zfixed
-                rsd[index(c_offset_U, j)] = -(rho_u(x, j+1) - rho_u(x, j))/m_dz[j];
+                rsd[index(c_offset_U, j)] = -(rho_u(x, j+1) - rho_u(x, j))/m_dz[j]
+                                            + continuitySource(x, j);
             }
             diag[index(c_offset_U, j)] = 0; // Algebraic constraint
         }
     } else { // "unstrained-flow" (fixed mass flow rate)
         for (size_t j = j0; j <= j1; j++) {
-            rsd[index(c_offset_U, j)] = rho_u(x, j) - rho_u(x, j-1);
+            rsd[index(c_offset_U, j)] = rho_u(x, j) - rho_u(x, j-1)
+                                        - m_dz[j-1] * continuitySource(x, j);
             diag[index(c_offset_U, j)] = 0; // Algebraic constraint
         }
     }
@@ -591,6 +596,7 @@ void Flow1D::evalMomentum(span<const double> x, span<double> rsd, span<int> diag
     size_t j1 = std::min(jmax, m_points-2);
     for (size_t j = j0; j <= j1; j++) { // interior points
         rsd[index(c_offset_V, j)] = (shear(x, j) - Lambda(x, j)
+                                     + momentumSource(x, j)
                                      - rho_u(x, j) * dVdz(x, j)
                                      - m_rho[j] * V(x, j) * V(x, j)) / m_rho[j];
         if (!m_twoPointControl) {
@@ -670,7 +676,8 @@ void Flow1D::evalEnergy(span<const double> x, span<double> rsd, span<int> diag,
             }
 
             rsd[index(c_offset_T, j)] = - m_cp[j]*rho_u(x, j)*dTdz(x, j)
-                                        - conduction(x, j) - sum;
+                                        - conduction(x, j) - sum
+                                        + energySource(x, j);
             rsd[index(c_offset_T, j)] /= (m_rho[j]*m_cp[j]);
             rsd[index(c_offset_T, j)] -= (m_qdotRadiation[j] / (m_rho[j] * m_cp[j]));
             if (!m_twoPointControl || (m_z[j] != m_tLeft && m_z[j] != m_tRight)) {
@@ -760,6 +767,7 @@ void Flow1D::evalSpecies(span<const double> x, span<double> rsd, span<int> diag,
             double convec = rho_u(x, j)*dYdz(x, k, j);
             double diffus = 2*(m_flux(k, j) - m_flux(k, j-1)) / (z(j+1) - z(j-1));
             rsd[index(c_offset_Y + k, j)] = (m_wt[k]*m_wdot(k, j)
+                                              + speciesSource(x, k, j)
                                               - convec - diffus) / m_rho[j]
                                             - rdt*(Y(x, k, j) - Y_prev(k, j));
             diag[index(c_offset_Y + k, j)] = 1;

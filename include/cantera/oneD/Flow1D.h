@@ -621,6 +621,31 @@ protected:
     virtual void evalSpecies(span<const double> x, span<double> rsd, span<int> diag,
                              double rdt, size_t jmin, size_t jmax);
 
+    //! Evaluate residuals for additional solution components in derived flow domains.
+    virtual void evalAdditionalEquations(span<const double> x, span<double> rsd,
+                                         span<int> diag, double rdt, size_t jmin,
+                                         size_t jmax) {}
+
+    //! Mass source term in the continuity equation [kg/m^3/s].
+    virtual double continuitySource(span<const double> x, size_t j) const {
+        return 0.0;
+    }
+
+    //! Source term in the radial momentum equation [N/m^3].
+    virtual double momentumSource(span<const double> x, size_t j) const {
+        return 0.0;
+    }
+
+    //! Volumetric heat source term in the gas energy equation [W/m^3].
+    virtual double energySource(span<const double> x, size_t j) const {
+        return 0.0;
+    }
+
+    //! Species mass source term in the species equation [kg/m^3/s].
+    virtual double speciesSource(span<const double> x, size_t k, size_t j) const {
+        return 0.0;
+    }
+
     /**
      * Evaluate the electric field equation residual to be zero everywhere.
      *
