@@ -89,6 +89,7 @@ void SprayFlow1D::setLiquidProperties(double density, double cp, double latentHe
     if (m_inletDropletDiameter != Undef) {
         m_inletDropletMass = m_sprayModel.dropletMass(m_inletDropletDiameter);
     }
+    setSprayBounds();
     needJacUpdate();
 }
 
@@ -98,8 +99,28 @@ void SprayFlow1D::setDropletDiameter(double diameter)
         throw CanteraError("SprayFlow1D::setDropletDiameter",
             "Droplet diameter must be positive.");
     }
+    if (diameter <= m_minDropletDiameter) {
+        throw CanteraError("SprayFlow1D::setDropletDiameter",
+            "Droplet diameter must be greater than the minimum droplet diameter.");
+    }
     m_inletDropletDiameter = diameter;
     m_inletDropletMass = m_sprayModel.dropletMass(diameter);
+    setSprayBounds();
+    needJacUpdate();
+}
+
+void SprayFlow1D::setMinimumDropletDiameter(double diameter)
+{
+    if (diameter <= 0.0) {
+        throw CanteraError("SprayFlow1D::setMinimumDropletDiameter",
+            "Minimum droplet diameter must be positive.");
+    }
+    if (m_inletDropletDiameter != Undef && diameter >= m_inletDropletDiameter) {
+        throw CanteraError("SprayFlow1D::setMinimumDropletDiameter",
+            "Minimum droplet diameter must be smaller than the inlet droplet diameter.");
+    }
+    m_minDropletDiameter = diameter;
+    setSprayBounds();
     needJacUpdate();
 }
 
@@ -174,7 +195,7 @@ void SprayFlow1D::resize(size_t components, size_t points)
 void SprayFlow1D::setSprayBounds()
 {
     setBounds(liquidMassDensityIndex(), 0.0, 1e20);
-    setBounds(dropletMassIndex(), 0.0, 1e20);
+    setBounds(dropletMassIndex(), minimumDropletMass(), 1e20);
     setBounds(dropletVelocityIndex(), -1e20, 1e20);
     setBounds(dropletSpreadRateIndex(), -1e20, 1e20);
     setBounds(dropletTemperatureIndex(), 150.0, 2*m_thermo->maxTemp());
@@ -210,6 +231,11 @@ void SprayFlow1D::checkSprayReady() const
         throw CanteraError("SprayFlow1D::checkSprayReady",
             "Specify either inlet liquid mass density or inlet liquid mass flux.");
     }
+    if (m_inletDropletDiameter <= m_minDropletDiameter) {
+        throw CanteraError("SprayFlow1D::checkSprayReady",
+            "The inlet droplet diameter must be greater than the minimum droplet "
+            "diameter.");
+    }
 }
 
 void SprayFlow1D::resetBadValues(span<double> xg)
@@ -220,7 +246,7 @@ void SprayFlow1D::resetBadValues(span<double> xg)
         x[index(liquidMassDensityIndex(), j)] =
             std::max(x[index(liquidMassDensityIndex(), j)], 0.0);
         x[index(dropletMassIndex(), j)] =
-            std::max(x[index(dropletMassIndex(), j)], 0.0);
+            std::max(x[index(dropletMassIndex(), j)], minimumDropletMass());
         x[index(dropletTemperatureIndex(), j)] =
             std::max(x[index(dropletTemperatureIndex(), j)], 150.0);
     }
@@ -302,6 +328,7 @@ AnyMap SprayFlow1D::getMeta() const
     AnyMap spray;
     spray["fuel-species"] = sprayFuel();
     spray["droplet-diameter"] = m_inletDropletDiameter;
+    spray["minimum-droplet-diameter"] = m_minDropletDiameter;
     spray["liquid-mass-density"] = m_inletLiquidMassDensity;
     spray["liquid-mass-flux"] = m_inletLiquidMassFlux;
     spray["liquid-temperature"] = m_inletLiquidTemperature;
@@ -309,6 +336,7 @@ AnyMap SprayFlow1D::getMeta() const
     spray["droplet-spread-rate"] = m_inletDropletSpreadRate;
     spray["inlet-side"] = m_inletSide;
     spray["free-flow-no-slip"] = m_freeFlowNoSlip;
+    spray["droplet-reversal-check"] = m_checkDropletReversal;
 
     const auto& liquid = m_sprayModel.liquidProperties();
     spray["liquid-density"] = liquid.density;
@@ -333,6 +361,7 @@ void SprayFlow1D::setMeta(const AnyMap& state)
                         spray["latent-heat"].asDouble(),
                         spray["boiling-temperature"].asDouble(),
                         spray.getDouble("saturation-pressure", OneAtm));
+    setMinimumDropletDiameter(spray.getDouble("minimum-droplet-diameter", 1e-7));
     setDropletDiameter(spray["droplet-diameter"].asDouble());
     if (spray.hasKey("liquid-mass-density")
         && spray["liquid-mass-density"].asDouble() != Undef) {
@@ -350,6 +379,7 @@ void SprayFlow1D::setMeta(const AnyMap& state)
     setDropletSpreadRate(spray.getDouble("droplet-spread-rate", 0.0));
     setSprayInlet(spray.getInt("inlet-side", 0));
     m_freeFlowNoSlip = spray.getBool("free-flow-no-slip", true);
+    m_checkDropletReversal = spray.getBool("droplet-reversal-check", true);
 }
 
 void SprayFlow1D::updateProperties(size_t jg, span<const double> x,
@@ -377,7 +407,7 @@ void SprayFlow1D::updateSpraySources(span<const double> x, size_t jmin, size_t j
 
         double mass = dropletMass(x, j);
         double rhoLiquid = liquidMassDensity(x, j);
-        if (mass <= 0.0 || rhoLiquid <= 0.0) {
+        if (mass <= 0.0 || dropletIsDry(x, j) || rhoLiquid <= 0.0) {
             continue;
         }
 
@@ -445,6 +475,7 @@ double SprayFlow1D::dropletMass(size_t j) const
 double SprayFlow1D::dropletDerivative(span<const double> x, size_t component,
                                       size_t j) const
 {
+    checkDropletReversal(x, j);
     double ud = dropletVelocity(x, j);
     size_t jloc = (ud > 0.0 ? j : j + 1);
     return (x[index(component, jloc)] - x[index(component, jloc-1)])
@@ -454,6 +485,38 @@ double SprayFlow1D::dropletDerivative(span<const double> x, size_t component,
 double SprayFlow1D::liquidMassFlux(span<const double> x, size_t j) const
 {
     return liquidMassDensity(x, j) * dropletVelocity(x, j);
+}
+
+double SprayFlow1D::minimumDropletMass() const
+{
+    const auto& liquid = m_sprayModel.liquidProperties();
+    if (m_minDropletDiameter <= 0.0 || liquid.density <= 0.0) {
+        return 0.0;
+    }
+    return m_sprayModel.dropletMass(m_minDropletDiameter);
+}
+
+bool SprayFlow1D::dropletIsDry(span<const double> x, size_t j) const
+{
+    double minMass = minimumDropletMass();
+    return minMass > 0.0 && dropletMass(x, j) <= minMass * (1.0 + 1e-8);
+}
+
+void SprayFlow1D::checkDropletReversal(span<const double> x, size_t j) const
+{
+    if (!m_checkDropletReversal || dropletIsDry(x, j)
+        || liquidMassDensity(x, j) <= 0.0) {
+        return;
+    }
+    double direction = m_inletSide == 0 ? 1.0 : -1.0;
+    if (direction * dropletVelocity(x, j) < -m_reversalTolerance) {
+        throw CanteraError("SprayFlow1D::checkDropletReversal",
+            "Droplet axial velocity changed sign at grid point {} (z = {} m). "
+            "The monodisperse spray equations are an inlet-value problem for the "
+            "dispersed phase and cannot continue through a droplet turning point. "
+            "Increase 'minimum_droplet_diameter' if droplets should dry out "
+            "first, or revise the spray inlet and slip conditions.", j, z(j));
+    }
 }
 
 double SprayFlow1D::inletDropletVelocity(span<const double> x, size_t j) const
@@ -538,6 +601,20 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
     size_t j0 = std::max<size_t>(jmin, 1);
     size_t j1 = std::min(jmax, m_points-2);
     for (size_t j = j0; j <= j1; j++) {
+        if (dropletIsDry(x, j)) {
+            rsd[index(iRho, j)] = liquidMassDensity(x, j);
+            diag[index(iRho, j)] = 0;
+            rsd[index(iMass, j)] = dropletMass(x, j) - minimumDropletMass();
+            diag[index(iMass, j)] = 0;
+            rsd[index(iVelocity, j)] = dropletVelocity(x, j) - u(x, j);
+            diag[index(iVelocity, j)] = 0;
+            rsd[index(iSpread, j)] = dropletSpreadRate(x, j);
+            diag[index(iSpread, j)] = 0;
+            rsd[index(iTemp, j)] = dropletTemperature(x, j) - T(x, j);
+            diag[index(iTemp, j)] = 0;
+            continue;
+        }
+
         double dz = dropletVelocity(x, j) > 0.0 ? m_dz[j-1] : m_dz[j];
         double upstreamFlux = dropletVelocity(x, j) > 0.0
             ? liquidMassFlux(x, j-1) : liquidMassFlux(x, j+1);

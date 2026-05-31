@@ -135,6 +135,13 @@ TEST(onedim, spray_flame_types)
               "liquid-mass-density");
     ASSERT_EQ(free->componentIndex("droplet_temperature"),
               free->componentIndex("droplet-temperature"));
+    free->setLiquidProperties(70.0, 9500.0, 4.5e5, 20.3);
+    free->setMinimumDropletDiameter(1e-6);
+    ASSERT_DOUBLE_EQ(free->minimumDropletDiameter(), 1e-6);
+    ASSERT_THROW(free->setDropletDiameter(1e-6), CanteraError);
+    ASSERT_TRUE(free->dropletReversalCheck());
+    free->setDropletReversalCheck(false);
+    ASSERT_FALSE(free->dropletReversalCheck());
 
     auto symm = newDomain<SprayFlow1D>("spray-axisymmetric-flow", sol, "flow");
     ASSERT_EQ(symm->domainType(), "spray-axisymmetric-flow");

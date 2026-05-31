@@ -117,6 +117,8 @@ cdef extern from "cantera/oneD/SprayFlow1D.h":
         string sprayFuel()
         void setLiquidProperties(double, double, double, double, double) except +translate_exception
         void setDropletDiameter(double) except +translate_exception
+        void setMinimumDropletDiameter(double) except +translate_exception
+        double minimumDropletDiameter()
         void setLiquidMassDensity(double) except +translate_exception
         void setLiquidMassFlux(double) except +translate_exception
         void setLiquidTemperature(double) except +translate_exception
@@ -126,6 +128,8 @@ cdef extern from "cantera/oneD/SprayFlow1D.h":
         int sprayInlet()
         void setFreeFlowNoSlip(cbool)
         cbool freeFlowNoSlip()
+        void setDropletReversalCheck(cbool)
+        cbool dropletReversalCheck()
         double sprayEvaporationRate(size_t) except +translate_exception
         double sprayHeatTransferRate(size_t) except +translate_exception
         double sprayGasEnergySource(size_t) except +translate_exception

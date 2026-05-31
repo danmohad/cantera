@@ -196,6 +196,10 @@ class TestMonodisperseSpray:
             )
         with pytest.raises(ValueError, match="only one"):
             self.make_spray(liquid_mass_density=1e-8, liquid_mass_flux=1e-6)
+        with pytest.raises(ValueError, match="minimum_droplet_diameter"):
+            self.make_spray(minimum_droplet_diameter=0.0)
+        with pytest.raises(ValueError, match="minimum_droplet_diameter"):
+            self.make_spray(minimum_droplet_diameter=10e-6)
 
     def test_free_flame_no_slip(self):
         gas = ct.Solution("h2o2.yaml")
@@ -205,6 +209,8 @@ class TestMonodisperseSpray:
         assert isinstance(sim.flame, ct.SprayFreeFlow)
         assert sim.flame.type == "spray-free-flow"
         assert sim.flame.free_flow_no_slip
+        assert sim.flame.minimum_droplet_diameter == approx(1e-7)
+        assert sim.flame.droplet_reversal_check
         assert sim.flame.liquid_mass_density == approx(1e-8)
         assert sim.flame.droplet_temperature == approx(20.0)
 
@@ -235,6 +241,28 @@ class TestMonodisperseSpray:
         assert sim.flame.droplet_velocity == approx(sim.flame.velocity)
         assert sim.flame.droplet_diameter[-1] < sim.flame.droplet_diameter[0]
 
+    def test_dryout_cutoff(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
+        spray = self.make_spray(
+            diameter=10e-6,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            minimum_droplet_diameter=5e-6,
+        )
+
+        sim = ct.FreeFlame(gas, width=0.01, spray=spray)
+        min_mass = np.pi / 6 * spray.liquid_density * spray.minimum_droplet_diameter**3
+        sim.flame.set_profile("droplet-mass", [0.0, 1.0], [min_mass, min_mass])
+        sim.eval()
+
+        assert sim.flame.minimum_droplet_diameter == approx(5e-6)
+        assert np.allclose(sim.flame.evaporation_rate, 0.0)
+        assert np.allclose(sim.flame.spray_heat_transfer_rate, 0.0)
+
     def test_counterflow_spray_constructor(self):
         gas = ct.Solution("h2o2.yaml")
         gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
@@ -253,6 +281,20 @@ class TestMonodisperseSpray:
         assert np.all(sim.flame.evaporation_rate > 0.0)
         assert np.all(sim.flame.droplet_diameter > 0.0)
         assert "liquid-mass-density" in sim.flame.component_names
+
+    def test_droplet_reversal_raises(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
+        spray = self.make_spray(droplet_velocity=0.2)
+
+        sim = ct.CounterflowDiffusionFlame(gas, width=0.02, spray=spray)
+        sim.fuel_inlet.mdot = 0.08
+        sim.oxidizer_inlet.mdot = 0.08
+        sim.set_initial_guess(mode="linear")
+        sim.flame.set_profile("droplet-velocity", [0.0, 1.0], [-0.2, -0.2])
+
+        with pytest.raises(ct.CanteraError, match="Droplet axial velocity changed sign"):
+            sim.eval()
 
     def test_counterflow_solve_with_slip(self):
         gas = ct.Solution("h2o2.yaml")

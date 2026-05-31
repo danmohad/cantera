@@ -973,12 +973,14 @@ cdef class SprayFlowBase(FlowBase):
                         liquid_mass_density=None, liquid_mass_flux=None,
                         droplet_velocity=None, droplet_spread_rate=0.0,
                         inlet="left", saturation_pressure=101325.0,
-                        free_flow_no_slip=True):
+                        free_flow_no_slip=True, minimum_droplet_diameter=1e-7,
+                        droplet_reversal_check=True):
         """Configure monodisperse liquid spray properties."""
         cdef CxxSprayFlow1D* flow = self.spray_flow()
         flow.setSprayFuel(stringify(fuel_species))
         flow.setLiquidProperties(liquid_density, liquid_cp, latent_heat,
                                  boiling_temperature, saturation_pressure)
+        flow.setMinimumDropletDiameter(minimum_droplet_diameter)
         flow.setDropletDiameter(diameter)
         if liquid_mass_density is not None:
             flow.setLiquidMassDensity(liquid_mass_density)
@@ -995,6 +997,7 @@ cdef class SprayFlowBase(FlowBase):
         else:
             raise ValueError("inlet must be 'left' or 'right'")
         flow.setFreeFlowNoSlip(<cbool>free_flow_no_slip)
+        flow.setDropletReversalCheck(<cbool>droplet_reversal_check)
 
     @property
     def spray_fuel(self):
@@ -1010,6 +1013,16 @@ cdef class SprayFlowBase(FlowBase):
     def free_flow_no_slip(self):
         """Whether droplets are constrained to no slip in free-flow flames."""
         return self.spray_flow().freeFlowNoSlip()
+
+    @property
+    def minimum_droplet_diameter(self):
+        """Minimum droplet diameter before droplets are treated as dry [m]."""
+        return self.spray_flow().minimumDropletDiameter()
+
+    @property
+    def droplet_reversal_check(self):
+        """Whether droplet axial reversal raises an error."""
+        return self.spray_flow().dropletReversalCheck()
 
     @property
     def evaporation_rate(self):

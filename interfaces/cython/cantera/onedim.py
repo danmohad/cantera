@@ -569,20 +569,27 @@ class MonodisperseSpray:
         "fuel_species", "diameter", "liquid_density", "liquid_cp", "latent_heat",
         "boiling_temperature", "liquid_temperature", "liquid_mass_density",
         "liquid_mass_flux", "droplet_velocity", "droplet_spread_rate",
-        "saturation_pressure",
+        "saturation_pressure", "minimum_droplet_diameter",
+        "droplet_reversal_check",
     )
 
     def __init__(self, *, fuel_species, diameter, liquid_density, liquid_cp,
                  latent_heat, boiling_temperature, liquid_temperature,
                  liquid_mass_density=None, liquid_mass_flux=None,
                  droplet_velocity=None, droplet_spread_rate=0.0,
-                 saturation_pressure=101325.0):
+                 saturation_pressure=101325.0, minimum_droplet_diameter=1e-7,
+                 droplet_reversal_check=True):
         if liquid_mass_density is None and liquid_mass_flux is None:
             raise ValueError(
                 "Specify either liquid_mass_density or liquid_mass_flux.")
         if liquid_mass_density is not None and liquid_mass_flux is not None:
             raise ValueError(
                 "Specify only one of liquid_mass_density or liquid_mass_flux.")
+        if minimum_droplet_diameter <= 0.0:
+            raise ValueError("minimum_droplet_diameter must be positive.")
+        if minimum_droplet_diameter >= diameter:
+            raise ValueError(
+                "minimum_droplet_diameter must be smaller than diameter.")
         self.fuel_species = fuel_species
         self.diameter = diameter
         self.liquid_density = liquid_density
@@ -595,6 +602,8 @@ class MonodisperseSpray:
         self.droplet_velocity = droplet_velocity
         self.droplet_spread_rate = droplet_spread_rate
         self.saturation_pressure = saturation_pressure
+        self.minimum_droplet_diameter = minimum_droplet_diameter
+        self.droplet_reversal_check = droplet_reversal_check
 
     def apply(self, flow, *, inlet="left", free_flow_no_slip=True):
         flow.configure_spray(
@@ -607,6 +616,8 @@ class MonodisperseSpray:
             droplet_spread_rate=self.droplet_spread_rate,
             inlet=inlet, saturation_pressure=self.saturation_pressure,
             free_flow_no_slip=free_flow_no_slip,
+            minimum_droplet_diameter=self.minimum_droplet_diameter,
+            droplet_reversal_check=self.droplet_reversal_check,
         )
 
     def set_initial_guess(self, flow):

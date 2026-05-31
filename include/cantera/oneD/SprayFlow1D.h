@@ -35,6 +35,14 @@ public:
     //! Set inlet droplet diameter [m].
     void setDropletDiameter(double diameter);
 
+    //! Set the minimum droplet diameter before droplets are treated as dry [m].
+    void setMinimumDropletDiameter(double diameter);
+
+    //! Minimum droplet diameter before droplets are treated as dry [m].
+    double minimumDropletDiameter() const {
+        return m_minDropletDiameter;
+    }
+
     //! Set inlet liquid mass density [kg/m^3].
     void setLiquidMassDensity(double density);
 
@@ -61,11 +69,22 @@ public:
     //! Set whether droplets are constrained to no slip in free-flow flames.
     void setFreeFlowNoSlip(bool noSlip) {
         m_freeFlowNoSlip = noSlip;
+        needJacUpdate();
     }
 
     //! Return whether free-flow droplets are constrained to no slip.
     bool freeFlowNoSlip() const {
         return m_freeFlowNoSlip;
+    }
+
+    //! Set whether droplet axial reversal raises an error.
+    void setDropletReversalCheck(bool check) {
+        m_checkDropletReversal = check;
+    }
+
+    //! Return whether droplet axial reversal raises an error.
+    bool dropletReversalCheck() const {
+        return m_checkDropletReversal;
     }
 
     //! Volumetric evaporation source term [kg/m^3/s].
@@ -168,6 +187,9 @@ protected:
     double dropletMass(size_t j) const;
     double dropletDerivative(span<const double> x, size_t component, size_t j) const;
     double liquidMassFlux(span<const double> x, size_t j) const;
+    double minimumDropletMass() const;
+    bool dropletIsDry(span<const double> x, size_t j) const;
+    void checkDropletReversal(span<const double> x, size_t j) const;
     void updateSpraySources(span<const double> x, size_t jmin, size_t jmax);
     void setSprayBounds();
     void checkSprayReady() const;
@@ -184,8 +206,11 @@ protected:
     double m_inletLiquidTemperature = Undef;
     double m_inletDropletVelocity = Undef;
     double m_inletDropletSpreadRate = 0.0;
+    double m_minDropletDiameter = 1e-7;
+    double m_reversalTolerance = 1e-12;
     int m_inletSide = 0;
     bool m_freeFlowNoSlip = true;
+    bool m_checkDropletReversal = true;
 
     vector<double> m_sprayMassSource;
     vector<double> m_sprayHeatTransfer;

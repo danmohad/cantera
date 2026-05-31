@@ -47,6 +47,8 @@ class MonodisperseSpray:
     droplet_velocity: float | None
     droplet_spread_rate: float
     saturation_pressure: float
+    minimum_droplet_diameter: float
+    droplet_reversal_check: bool
     def __init__(
         self,
         *,
@@ -62,6 +64,8 @@ class MonodisperseSpray:
         droplet_velocity: float | None = None,
         droplet_spread_rate: float = 0.0,
         saturation_pressure: float = 101325.0,
+        minimum_droplet_diameter: float = 1e-7,
+        droplet_reversal_check: bool = True,
     ) -> None: ...
     def apply(
         self, flow: SprayFlowBase, *, inlet: str = "left",
