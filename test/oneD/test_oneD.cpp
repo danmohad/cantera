@@ -6,6 +6,7 @@
 #include "cantera/onedim.h"
 #include "cantera/oneD/DomainFactory.h"
 #include "cantera/oneD/IonFlow.h"
+#include "cantera/oneD/SprayFlow1D.h"
 
 using namespace Cantera;
 
@@ -122,6 +123,57 @@ TEST(onedim, ion_flame_types)
     ASSERT_EQ(symm->domainType(), "axisymmetric-ion-flow");
     auto burner = newDomain<IonFlow>("unstrained-flow", sol, "flow");
     ASSERT_EQ(burner->domainType(), "unstrained-ion-flow");
+}
+
+TEST(onedim, spray_flame_types)
+{
+    auto sol = newSolution("h2o2.yaml", "ohmech", "mixture-averaged");
+
+    auto free = newDomain<SprayFlow1D>("spray-free-flow", sol, "flow");
+    ASSERT_EQ(free->domainType(), "spray-free-flow");
+    ASSERT_EQ(free->componentName(free->componentIndex("liquid-mass-density")),
+              "liquid-mass-density");
+    ASSERT_EQ(free->componentIndex("droplet_temperature"),
+              free->componentIndex("droplet-temperature"));
+
+    auto symm = newDomain<SprayFlow1D>("spray-axisymmetric-flow", sol, "flow");
+    ASSERT_EQ(symm->domainType(), "spray-axisymmetric-flow");
+    ASSERT_TRUE(symm->componentActive(symm->componentIndex("droplet-spread-rate")));
+
+    auto burner = newDomain<SprayFlow1D>("spray-unstrained-flow", sol, "flow");
+    ASSERT_EQ(burner->domainType(), "spray-unstrained-flow");
+    ASSERT_FALSE(burner->componentActive(burner->componentIndex("droplet-spread-rate")));
+}
+
+TEST(onedim, spray_sources)
+{
+    auto sol = newSolution("h2o2.yaml", "ohmech", "mixture-averaged");
+    auto gas = sol->thermo();
+    gas->setState_TPX(900.0, OneAtm, "H2:1e-12, O2:0.21, N2:0.79");
+
+    auto flow = newDomain<SprayFlow1D>("spray-free-flow", sol, "flow");
+    flow->setupUniformGrid(6, 0.01);
+    flow->setSprayFuel("H2");
+    flow->setLiquidProperties(70.0, 9500.0, 4.5e5, 20.3);
+    flow->setDropletDiameter(10e-6);
+    flow->setLiquidMassDensity(1e-8);
+    flow->setLiquidTemperature(20.0);
+
+    auto inlet = newBoundary1D("inlet", sol);
+    inlet->setMoleFractions("H2:1e-12, O2:0.21, N2:0.79");
+    inlet->setMdot(0.2 * gas->density());
+    inlet->setTemperature(900.0);
+
+    auto outlet = newBoundary1D("outlet", sol);
+    vector<shared_ptr<Domain1D>> domains { inlet, flow, outlet };
+    auto sim = newSim1D(domains);
+    sim->eval(0.0);
+
+    ASSERT_GT(flow->sprayEvaporationRate(1), 0.0);
+    ASSERT_LT(flow->sprayGasEnergySource(1), 0.0);
+    ASSERT_GT(flow->dropletDiameter(1), 0.0);
+    ASSERT_EQ(flow->values("liquid-mass-density").size(), flow->nPoints());
+    ASSERT_EQ(flow->values("droplet-velocity")[1], flow->values("velocity")[1]);
 }
 
 int main(int argc, char** argv)

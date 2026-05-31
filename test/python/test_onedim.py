@@ -167,6 +167,121 @@ class TestOnedim:
             with pytest.raises(ValueError, match="mutually exclusive"):
                 sim = cls(gas, grid=[0, 0.1, 0.2], width=0.4)
 
+
+class TestMonodisperseSpray:
+    def make_spray(self, **kwargs):
+        params = dict(
+            fuel_species="H2",
+            diameter=10e-6,
+            liquid_density=70.0,
+            liquid_cp=9500.0,
+            latent_heat=4.5e5,
+            boiling_temperature=20.3,
+            liquid_temperature=20.0,
+            liquid_mass_density=1e-8,
+        )
+        params.update(kwargs)
+        return ct.MonodisperseSpray(**params)
+
+    def test_requires_loading(self):
+        with pytest.raises(ValueError, match="liquid_mass_density"):
+            ct.MonodisperseSpray(
+                fuel_species="H2",
+                diameter=10e-6,
+                liquid_density=70.0,
+                liquid_cp=9500.0,
+                latent_heat=4.5e5,
+                boiling_temperature=20.3,
+                liquid_temperature=20.0,
+            )
+        with pytest.raises(ValueError, match="only one"):
+            self.make_spray(liquid_mass_density=1e-8, liquid_mass_flux=1e-6)
+
+    def test_free_flame_no_slip(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
+
+        sim = ct.FreeFlame(gas, width=0.01, spray=self.make_spray())
+        assert isinstance(sim.flame, ct.SprayFreeFlow)
+        assert sim.flame.type == "spray-free-flow"
+        assert sim.flame.free_flow_no_slip
+        assert sim.flame.liquid_mass_density == approx(1e-8)
+        assert sim.flame.droplet_temperature == approx(20.0)
+
+        sim.eval()
+        assert np.all(sim.flame.evaporation_rate > 0.0)
+        assert np.all(sim.flame.spray_gas_energy_source < 0.0)
+        assert sim.flame.droplet_velocity == approx(sim.flame.velocity)
+
+    def test_free_flame_solve_no_slip(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "H2:0.8, O2:0.4, AR:3.76"
+        spray = self.make_spray(
+            diameter=1e-3,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            liquid_mass_density=1e-12,
+        )
+
+        sim = ct.FreeFlame(gas, width=0.015, spray=spray)
+        sim.set_initial_guess()
+        sim.solve(loglevel=0, refine_grid=False, auto=False)
+
+        assert max(sim.T) > 1000.0
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert sim.flame.droplet_velocity == approx(sim.flame.velocity)
+        assert sim.flame.droplet_diameter[-1] < sim.flame.droplet_diameter[0]
+
+    def test_counterflow_spray_constructor(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
+        spray = self.make_spray(droplet_velocity=0.2)
+
+        sim = ct.CounterflowDiffusionFlame(gas, width=0.02, spray=spray)
+        assert isinstance(sim.flame, ct.SprayAxisymmetricFlow)
+        assert sim.flame.type == "spray-axisymmetric-flow"
+        assert sim.flame.spray_inlet == "left"
+
+        sim.fuel_inlet.mdot = 0.08
+        sim.oxidizer_inlet.mdot = 0.08
+        sim.set_initial_guess(mode="linear")
+        sim.eval()
+
+        assert np.all(sim.flame.evaporation_rate > 0.0)
+        assert np.all(sim.flame.droplet_diameter > 0.0)
+        assert "liquid-mass-density" in sim.flame.component_names
+
+    def test_counterflow_solve_with_slip(self):
+        gas = ct.Solution("h2o2.yaml")
+        spray = self.make_spray(
+            diameter=1e-3,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            liquid_mass_density=1e-8,
+            droplet_velocity=0.2,
+        )
+
+        sim = ct.CounterflowDiffusionFlame(gas, width=0.02, spray=spray)
+        sim.fuel_inlet.T = 300.0
+        sim.fuel_inlet.X = "H2:1"
+        sim.fuel_inlet.mdot = 0.05
+        sim.oxidizer_inlet.T = 300.0
+        sim.oxidizer_inlet.X = "O2:1, AR:3.76"
+        sim.oxidizer_inlet.mdot = 0.05
+        sim.set_initial_guess(mode="linear")
+        sim.energy_enabled = False
+        sim.solve(loglevel=0, refine_grid=False, auto=False)
+
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert max(abs(sim.flame.droplet_velocity)) > 0.0
+        assert max(abs(sim.flame.droplet_spread_rate)) > 0.0
+
 def check_component_order(fname: str, group: str):
     with fname.open("r", encoding="utf-8") as fid:
         reader = yaml.YAML(typ="safe")
