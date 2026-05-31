@@ -962,6 +962,134 @@ cdef class AxisymmetricFlow(FlowBase):
     _domain_type = "axisymmetric-flow"
 
 
+cdef class SprayFlowBase(FlowBase):
+    """Base class for monodisperse spray flow domains."""
+
+    cdef CxxSprayFlow1D* spray_flow(self):
+        return <CxxSprayFlow1D*> self.flow
+
+    def configure_spray(self, fuel_species, diameter, liquid_density, liquid_cp,
+                        latent_heat, boiling_temperature, liquid_temperature,
+                        liquid_mass_density=None, liquid_mass_flux=None,
+                        droplet_velocity=None, droplet_spread_rate=0.0,
+                        inlet="left", saturation_pressure=101325.0,
+                        free_flow_no_slip=True):
+        """Configure monodisperse liquid spray properties."""
+        cdef CxxSprayFlow1D* flow = self.spray_flow()
+        flow.setSprayFuel(stringify(fuel_species))
+        flow.setLiquidProperties(liquid_density, liquid_cp, latent_heat,
+                                 boiling_temperature, saturation_pressure)
+        flow.setDropletDiameter(diameter)
+        if liquid_mass_density is not None:
+            flow.setLiquidMassDensity(liquid_mass_density)
+        if liquid_mass_flux is not None:
+            flow.setLiquidMassFlux(liquid_mass_flux)
+        flow.setLiquidTemperature(liquid_temperature)
+        if droplet_velocity is not None:
+            flow.setDropletVelocity(droplet_velocity)
+        flow.setDropletSpreadRate(droplet_spread_rate)
+        if inlet in ("left", 0):
+            flow.setSprayInlet(0)
+        elif inlet in ("right", 1):
+            flow.setSprayInlet(1)
+        else:
+            raise ValueError("inlet must be 'left' or 'right'")
+        flow.setFreeFlowNoSlip(<cbool>free_flow_no_slip)
+
+    @property
+    def spray_fuel(self):
+        """Gas-phase fuel species supplied by evaporating droplets."""
+        return pystr(self.spray_flow().sprayFuel())
+
+    @property
+    def spray_inlet(self):
+        """Spray inlet side: ``'left'`` or ``'right'``."""
+        return "left" if self.spray_flow().sprayInlet() == 0 else "right"
+
+    @property
+    def free_flow_no_slip(self):
+        """Whether droplets are constrained to no slip in free-flow flames."""
+        return self.spray_flow().freeFlowNoSlip()
+
+    @property
+    def evaporation_rate(self):
+        """Volumetric droplet evaporation source [kg/m^3/s]."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().sprayEvaporationRate(j)
+        return data
+
+    @property
+    def spray_heat_transfer_rate(self):
+        """Heat transferred from gas to liquid droplets [W/m^3]."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().sprayHeatTransferRate(j)
+        return data
+
+    @property
+    def spray_gas_energy_source(self):
+        """Gas energy source term induced by the spray [W/m^3]."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().sprayGasEnergySource(j)
+        return data
+
+    @property
+    def droplet_diameter(self):
+        """Droplet diameter [m]."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().dropletDiameter(j)
+        return data
+
+    @property
+    def droplet_reynolds_number(self):
+        """Droplet Reynolds number."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().dropletReynoldsNumber(j)
+        return data
+
+    @property
+    def droplet_nusselt_number(self):
+        """Droplet Nusselt number."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().dropletNusseltNumber(j)
+        return data
+
+    @property
+    def droplet_sherwood_number(self):
+        """Droplet Sherwood number."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().dropletSherwoodNumber(j)
+        return data
+
+
+cdef class SprayFreeFlow(SprayFlowBase):
+    """A free-flow domain with monodisperse evaporating droplets."""
+    _domain_type = "spray-free-flow"
+
+
+cdef class SprayUnstrainedFlow(SprayFlowBase):
+    """An unstrained flow domain with monodisperse evaporating droplets."""
+    _domain_type = "spray-unstrained-flow"
+
+
+cdef class SprayAxisymmetricFlow(SprayFlowBase):
+    """An axisymmetric flow domain with monodisperse evaporating droplets."""
+    _domain_type = "spray-axisymmetric-flow"
+
+
 cdef class Sim1D:
     """
     Class Sim1D is a container for one-dimensional domains. It also holds the

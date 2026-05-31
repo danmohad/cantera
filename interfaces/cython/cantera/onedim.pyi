@@ -15,6 +15,10 @@ from ._onedim import (
     Outlet1D,
     ReactingSurface1D,
     Sim1D,
+    SprayAxisymmetricFlow,
+    SprayFlowBase,
+    SprayFreeFlow,
+    SprayUnstrainedFlow,
     Surface1D,
     SymmetryPlane1D,
     UnstrainedFlow,
@@ -29,6 +33,41 @@ from ._types import (
 )
 from .composite import Solution, SolutionArray
 from .kinetics import Kinetics
+
+class MonodisperseSpray:
+    fuel_species: str
+    diameter: float
+    liquid_density: float
+    liquid_cp: float
+    latent_heat: float
+    boiling_temperature: float
+    liquid_temperature: float
+    liquid_mass_density: float | None
+    liquid_mass_flux: float | None
+    droplet_velocity: float | None
+    droplet_spread_rate: float
+    saturation_pressure: float
+    def __init__(
+        self,
+        *,
+        fuel_species: str,
+        diameter: float,
+        liquid_density: float,
+        liquid_cp: float,
+        latent_heat: float,
+        boiling_temperature: float,
+        liquid_temperature: float,
+        liquid_mass_density: float | None = None,
+        liquid_mass_flux: float | None = None,
+        droplet_velocity: float | None = None,
+        droplet_spread_rate: float = 0.0,
+        saturation_pressure: float = 101325.0,
+    ) -> None: ...
+    def apply(
+        self, flow: SprayFlowBase, *, inlet: str = "left",
+        free_flow_no_slip: bool = True
+    ) -> None: ...
+    def set_initial_guess(self, flow: SprayFlowBase) -> None: ...
 
 class FlameBase(Sim1D):
     gas: Solution
@@ -323,9 +362,11 @@ class FlameBase(Sim1D):
 class FreeFlame(FlameBase):
     inlet: Inlet1D
     outlet: Outlet1D
-    flame: FreeFlow
+    flame: FreeFlow | SprayFreeFlow
+    spray: MonodisperseSpray | None
     def __init__(
-        self, gas: Solution, grid: ArrayLike | None = None, width: float | None = None
+        self, gas: Solution, grid: ArrayLike | None = None,
+        width: float | None = None, spray: MonodisperseSpray | dict | None = None
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,
@@ -344,9 +385,11 @@ class FreeFlame(FlameBase):
 class BurnerFlame(FlameBase):
     burner: Inlet1D
     outlet: Outlet1D
-    flame: UnstrainedFlow
+    flame: UnstrainedFlow | SprayUnstrainedFlow
+    spray: MonodisperseSpray | None
     def __init__(
-        self, gas: Solution, grid: ArrayLike | None = None, width: float | None = None
+        self, gas: Solution, grid: ArrayLike | None = None,
+        width: float | None = None, spray: MonodisperseSpray | dict | None = None
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,
@@ -363,9 +406,12 @@ class BurnerFlame(FlameBase):
 class CounterflowDiffusionFlame(FlameBase):
     fuel_inlet: Inlet1D
     oxidizer_inlet: Inlet1D
-    flame: AxisymmetricFlow
+    flame: AxisymmetricFlow | SprayAxisymmetricFlow
+    spray: MonodisperseSpray | None
     def __init__(
-        self, gas: Solution, grid: ArrayLike | None = None, width: float | None = None
+        self, gas: Solution, grid: ArrayLike | None = None,
+        width: float | None = None, spray: MonodisperseSpray | dict | None = None,
+        spray_inlet: Literal["fuel", "oxidizer"] = "fuel",
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,
@@ -399,14 +445,16 @@ class CounterflowDiffusionFlame(FlameBase):
 
 class ImpingingJet(FlameBase):
     inlet: Inlet1D
-    flame: AxisymmetricFlow
+    flame: AxisymmetricFlow | SprayAxisymmetricFlow
     surface: Surface1D | ReactingSurface1D
+    spray: MonodisperseSpray | None
     def __init__(
         self,
         gas: Solution,
         grid: ArrayLike | None = None,
         width: float | None = None,
         surface: Kinetics | None = None,
+        spray: MonodisperseSpray | dict | None = None,
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,
@@ -418,9 +466,12 @@ class ImpingingJet(FlameBase):
 class CounterflowPremixedFlame(FlameBase):
     reactants: Inlet1D
     products: Inlet1D
-    flame: AxisymmetricFlow
+    flame: AxisymmetricFlow | SprayAxisymmetricFlow
+    spray: MonodisperseSpray | None
     def __init__(
-        self, gas: Solution, grid: ArrayLike | None = None, width: float | None = None
+        self, gas: Solution, grid: ArrayLike | None = None,
+        width: float | None = None, spray: MonodisperseSpray | dict | None = None,
+        spray_inlet: Literal["reactants", "products"] = "reactants",
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,
@@ -431,10 +482,12 @@ class CounterflowPremixedFlame(FlameBase):
 
 class CounterflowTwinPremixedFlame(FlameBase):
     reactants: Inlet1D
-    flame: AxisymmetricFlow
+    flame: AxisymmetricFlow | SprayAxisymmetricFlow
     products: SymmetryPlane1D
+    spray: MonodisperseSpray | None
     def __init__(
-        self, gas: Solution, grid: ArrayLike | None = None, width: float | None = None
+        self, gas: Solution, grid: ArrayLike | None = None,
+        width: float | None = None, spray: MonodisperseSpray | dict | None = None
     ) -> None: ...
     def set_initial_guess(  # type: ignore[override]
         self,

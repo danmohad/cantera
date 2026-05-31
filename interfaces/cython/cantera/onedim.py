@@ -8,6 +8,7 @@ import numpy as np
 
 from ._onedim import (
     AxisymmetricFlow, FreeFlow, Inlet1D, Outlet1D, ReactingSurface1D, Sim1D,
+    SprayAxisymmetricFlow, SprayFreeFlow, SprayUnstrainedFlow,
     Surface1D, SymmetryPlane1D, UnstrainedFlow,
 )
 from ._utils import CanteraError, __git_commit__, __version__, hdf_support
@@ -562,11 +563,94 @@ for _attr in ['forward_rates_of_progress', 'reverse_rates_of_progress', 'net_rat
     setattr(FlameBase, _attr, _array_property(_attr, 'n_reactions'))
 
 
+class MonodisperseSpray:
+    """Monodisperse liquid spray parameters for one-dimensional flames."""
+    __slots__ = (
+        "fuel_species", "diameter", "liquid_density", "liquid_cp", "latent_heat",
+        "boiling_temperature", "liquid_temperature", "liquid_mass_density",
+        "liquid_mass_flux", "droplet_velocity", "droplet_spread_rate",
+        "saturation_pressure",
+    )
+
+    def __init__(self, *, fuel_species, diameter, liquid_density, liquid_cp,
+                 latent_heat, boiling_temperature, liquid_temperature,
+                 liquid_mass_density=None, liquid_mass_flux=None,
+                 droplet_velocity=None, droplet_spread_rate=0.0,
+                 saturation_pressure=101325.0):
+        if liquid_mass_density is None and liquid_mass_flux is None:
+            raise ValueError(
+                "Specify either liquid_mass_density or liquid_mass_flux.")
+        if liquid_mass_density is not None and liquid_mass_flux is not None:
+            raise ValueError(
+                "Specify only one of liquid_mass_density or liquid_mass_flux.")
+        self.fuel_species = fuel_species
+        self.diameter = diameter
+        self.liquid_density = liquid_density
+        self.liquid_cp = liquid_cp
+        self.latent_heat = latent_heat
+        self.boiling_temperature = boiling_temperature
+        self.liquid_temperature = liquid_temperature
+        self.liquid_mass_density = liquid_mass_density
+        self.liquid_mass_flux = liquid_mass_flux
+        self.droplet_velocity = droplet_velocity
+        self.droplet_spread_rate = droplet_spread_rate
+        self.saturation_pressure = saturation_pressure
+
+    def apply(self, flow, *, inlet="left", free_flow_no_slip=True):
+        flow.configure_spray(
+            self.fuel_species, self.diameter, self.liquid_density,
+            self.liquid_cp, self.latent_heat, self.boiling_temperature,
+            self.liquid_temperature,
+            liquid_mass_density=self.liquid_mass_density,
+            liquid_mass_flux=self.liquid_mass_flux,
+            droplet_velocity=self.droplet_velocity,
+            droplet_spread_rate=self.droplet_spread_rate,
+            inlet=inlet, saturation_pressure=self.saturation_pressure,
+            free_flow_no_slip=free_flow_no_slip,
+        )
+
+    def set_initial_guess(self, flow):
+        zrel = (flow.grid - flow.grid[0]) / (flow.grid[-1] - flow.grid[0])
+        mass = np.pi / 6 * self.liquid_density * self.diameter**3
+
+        if flow.type == "spray-free-flow" and flow.free_flow_no_slip:
+            velocity = flow.velocity
+        elif self.droplet_velocity is None:
+            velocity = flow.velocity
+        else:
+            sign = -1.0 if flow.spray_inlet == "right" else 1.0
+            velocity = np.full(flow.n_points, sign * abs(self.droplet_velocity))
+
+        if self.liquid_mass_density is None:
+            liquid_density = self.liquid_mass_flux / np.maximum(np.abs(velocity), 1e-12)
+        else:
+            liquid_density = np.full(flow.n_points, self.liquid_mass_density)
+
+        flow.set_profile("liquid-mass-density", zrel, liquid_density)
+        flow.set_profile("droplet-mass", zrel, np.full(flow.n_points, mass))
+        flow.set_profile("droplet-velocity", zrel, velocity)
+        if flow.type == "spray-axisymmetric-flow":
+            flow.set_profile("droplet-spread-rate", zrel,
+                             np.full(flow.n_points, self.droplet_spread_rate))
+        flow.set_profile("droplet-temperature", zrel,
+                         np.full(flow.n_points, self.liquid_temperature))
+
+
+def _coerce_spray(spray):
+    if spray is None:
+        return None
+    if isinstance(spray, MonodisperseSpray):
+        return spray
+    if isinstance(spray, dict):
+        return MonodisperseSpray(**spray)
+    raise TypeError("spray must be a MonodisperseSpray object or a dictionary")
+
+
 class FreeFlame(FlameBase):
     """A freely-propagating flat flame."""
-    __slots__ = ('inlet', 'flame', 'outlet')
+    __slots__ = ('inlet', 'flame', 'outlet', 'spray')
 
-    def __init__(self, gas, grid=None, width=None):
+    def __init__(self, gas, grid=None, width=None, spray=None):
         """
         A domain of type `FreeFlow` named 'flame' will be created to represent
         the flame. The three domains comprising the stack are stored as ``self.inlet``,
@@ -587,7 +671,11 @@ class FreeFlame(FlameBase):
         #: `Outlet1D` at the right of the domain representing the burned products
         self.outlet = Outlet1D(name='products', phase=gas)
 
-        if not hasattr(self, 'flame'):
+        self.spray = _coerce_spray(spray)
+        if self.spray is not None:
+            self.flame = SprayFreeFlow(gas, name='flame')
+            self.spray.apply(self.flame, inlet="left", free_flow_no_slip=True)
+        elif not hasattr(self, 'flame'):
             # Create flame domain if not already instantiated by a child class
             #: `FreeFlow` domain representing the flame
             self.flame = FreeFlow(gas, name='flame')
@@ -659,6 +747,8 @@ class FreeFlame(FlameBase):
         for n in range(self.gas.n_species):
             self.flame.set_profile(self.gas.species_name(n),
                              locs, [Y0[n], Y0[n], Yeq[n], Yeq[n]])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)
 
     def solve(self, loglevel=1, refine_grid=True, auto=False):
         """
@@ -755,9 +845,9 @@ class FreeFlame(FlameBase):
 
 class BurnerFlame(FlameBase):
     """A burner-stabilized flat flame."""
-    __slots__ = ('burner', 'flame', 'outlet')
+    __slots__ = ('burner', 'flame', 'outlet', 'spray')
 
-    def __init__(self, gas, grid=None, width=None):
+    def __init__(self, gas, grid=None, width=None, spray=None):
         """
         :param gas:
             `Solution` (using the IdealGas thermodynamic model) used to
@@ -781,7 +871,11 @@ class BurnerFlame(FlameBase):
         #: `Outlet1D` at the right of the domain representing the burned gas
         self.outlet = Outlet1D(name='outlet', phase=gas)
 
-        if not hasattr(self, 'flame'):
+        self.spray = _coerce_spray(spray)
+        if self.spray is not None:
+            self.flame = SprayUnstrainedFlow(gas, name='flame')
+            self.spray.apply(self.flame, inlet="left", free_flow_no_slip=False)
+        elif not hasattr(self, 'flame'):
             # Create flame domain if not already instantiated by a child class
             #: `UnstrainedFlow` domain representing the flame
             self.flame = UnstrainedFlow(gas, name='flame')
@@ -828,6 +922,8 @@ class BurnerFlame(FlameBase):
         for n in range(self.gas.n_species):
             self.flame.set_profile(self.gas.species_name(n),
                              locs, [Y0[n], Yeq[n], Yeq[n]])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)
 
     def solve(self, loglevel=1, refine_grid=True, auto=False):
         """
@@ -889,9 +985,9 @@ class BurnerFlame(FlameBase):
 
 class CounterflowDiffusionFlame(FlameBase):
     """ A counterflow diffusion flame """
-    __slots__ = ('fuel_inlet', 'flame', 'oxidizer_inlet')
+    __slots__ = ('fuel_inlet', 'flame', 'oxidizer_inlet', 'spray')
 
-    def __init__(self, gas, grid=None, width=None):
+    def __init__(self, gas, grid=None, width=None, spray=None, spray_inlet="fuel"):
         """
         :param gas:
             `Solution` (using the IdealGas thermodynamic model) used to
@@ -917,8 +1013,19 @@ class CounterflowDiffusionFlame(FlameBase):
         self.oxidizer_inlet = Inlet1D(name='oxidizer_inlet', phase=gas)
         self.oxidizer_inlet.T = gas.T
 
-        #: `AxisymmetricFlow` domain representing the flame
-        self.flame = AxisymmetricFlow(gas, name='flame')
+        self.spray = _coerce_spray(spray)
+        if self.spray is None:
+            #: `AxisymmetricFlow` domain representing the flame
+            self.flame = AxisymmetricFlow(gas, name='flame')
+        else:
+            self.flame = SprayAxisymmetricFlow(gas, name='flame')
+            if spray_inlet in ("fuel", "left", 0):
+                inlet = "left"
+            elif spray_inlet in ("oxidizer", "right", 1):
+                inlet = "right"
+            else:
+                raise ValueError("spray_inlet must be 'fuel' or 'oxidizer'")
+            self.spray.apply(self.flame, inlet=inlet, free_flow_no_slip=False)
 
         if width is not None:
             if grid is not None:
@@ -988,6 +1095,8 @@ class CounterflowDiffusionFlame(FlameBase):
             self.flame.set_profile('T', zrel, T)
             for k, spec in enumerate(self.gas.species_names):
                 self.flame.set_profile(spec, zrel, Y[:,k])
+            if self.spray is not None:
+                self.spray.set_initial_guess(self.flame)
             return
 
         afr = self.gas.stoich_air_fuel_ratio(Yin_f, Yin_o, 'mass')
@@ -1033,6 +1142,8 @@ class CounterflowDiffusionFlame(FlameBase):
         self.flame.set_profile('T', zrel, T)
         for k,spec in enumerate(self.gas.species_names):
             self.flame.set_profile(spec, zrel, Y[:,k])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)
 
     def extinct(self):
         return max(self.T) - max(self.fuel_inlet.T, self.oxidizer_inlet.T) < 10
@@ -1239,9 +1350,9 @@ class CounterflowDiffusionFlame(FlameBase):
 
 class ImpingingJet(FlameBase):
     """An axisymmetric flow impinging on a surface at normal incidence."""
-    __slots__ = ('inlet', 'flame', 'surface')
+    __slots__ = ('inlet', 'flame', 'surface', 'spray')
 
-    def __init__(self, gas, grid=None, width=None, surface=None):
+    def __init__(self, gas, grid=None, width=None, surface=None, spray=None):
         """
         :param gas:
             `Solution` (using the IdealGas thermodynamic model) used to
@@ -1264,8 +1375,13 @@ class ImpingingJet(FlameBase):
         #: `Inlet1D` at the left of the domain representing the incoming reactants
         self.inlet = Inlet1D(name='inlet', phase=gas)
 
-        #: `AxisymmetricFlow` domain representing the flame
-        self.flame = AxisymmetricFlow(gas, name='flame')
+        self.spray = _coerce_spray(spray)
+        if self.spray is None:
+            #: `AxisymmetricFlow` domain representing the flame
+            self.flame = AxisymmetricFlow(gas, name='flame')
+        else:
+            self.flame = SprayAxisymmetricFlow(gas, name='flame')
+            self.spray.apply(self.flame, inlet="left", free_flow_no_slip=False)
         self.flame.set_axisymmetric_flow()
 
         if width is not None:
@@ -1324,13 +1440,15 @@ class ImpingingJet(FlameBase):
         locs = np.array([0.0, 1.0])
         self.flame.set_profile("velocity", locs, [u0, 0.0])
         self.flame.set_profile("spreadRate", locs, [0.0, 0.0])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)
 
 
 class CounterflowPremixedFlame(FlameBase):
     """ A premixed counterflow flame """
-    __slots__ = ('reactants', 'flame', 'products')
+    __slots__ = ('reactants', 'flame', 'products', 'spray')
 
-    def __init__(self, gas, grid=None, width=None):
+    def __init__(self, gas, grid=None, width=None, spray=None, spray_inlet="reactants"):
         """
         :param gas:
             `Solution` (using the IdealGas thermodynamic model) used to
@@ -1355,8 +1473,19 @@ class CounterflowPremixedFlame(FlameBase):
         self.products = Inlet1D(name='products', phase=gas)
         self.products.T = gas.T
 
-        #: `AxisymmetricFlow` domain representing the flame
-        self.flame = AxisymmetricFlow(gas, name='flame')
+        self.spray = _coerce_spray(spray)
+        if self.spray is None:
+            #: `AxisymmetricFlow` domain representing the flame
+            self.flame = AxisymmetricFlow(gas, name='flame')
+        else:
+            self.flame = SprayAxisymmetricFlow(gas, name='flame')
+            if spray_inlet in ("reactants", "left", 0):
+                inlet = "left"
+            elif spray_inlet in ("products", "right", 1):
+                inlet = "right"
+            else:
+                raise ValueError("spray_inlet must be 'reactants' or 'products'")
+            self.spray.apply(self.flame, inlet=inlet, free_flow_no_slip=False)
 
         if width is not None:
             if grid is not None:
@@ -1428,6 +1557,8 @@ class CounterflowPremixedFlame(FlameBase):
         self.flame.set_profile("velocity", [0.0, 1.0], [uu, -ub])
         self.flame.set_profile("spreadRate", [0.0, x0/dz, 1.0], [0.0, a, 0.0])
         self.flame.set_profile("Lambda", [0.0, 1.0], [L, L])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)
 
 
 class CounterflowTwinPremixedFlame(FlameBase):
@@ -1435,9 +1566,9 @@ class CounterflowTwinPremixedFlame(FlameBase):
     A twin premixed counterflow flame. Two opposed jets of the same composition
     shooting into each other.
     """
-    __slots__ = ('reactants', 'flame', 'products')
+    __slots__ = ('reactants', 'flame', 'products', 'spray')
 
-    def __init__(self, gas, grid=None, width=None):
+    def __init__(self, gas, grid=None, width=None, spray=None):
         """
         :param gas:
             `Solution` (using the IdealGas thermodynamic model) used to
@@ -1456,8 +1587,13 @@ class CounterflowTwinPremixedFlame(FlameBase):
         self.reactants = Inlet1D(name='reactants', phase=gas)
         self.reactants.T = gas.T
 
-        #: `AxisymmetricFlow` domain representing the flame
-        self.flame = AxisymmetricFlow(gas, name='flame')
+        self.spray = _coerce_spray(spray)
+        if self.spray is None:
+            #: `AxisymmetricFlow` domain representing the flame
+            self.flame = AxisymmetricFlow(gas, name='flame')
+        else:
+            self.flame = SprayAxisymmetricFlow(gas, name='flame')
+            self.spray.apply(self.flame, inlet="left", free_flow_no_slip=False)
 
         #The right boundary is a symmetry plane
         self.products = SymmetryPlane1D(name='products', phase=gas)
@@ -1512,3 +1648,5 @@ class CounterflowTwinPremixedFlame(FlameBase):
         self.flame.set_profile("velocity", [0.0, 1.0], [uu, 0])
         self.flame.set_profile("spreadRate", [0.0, 1.0], [0.0, a])
         self.flame.set_profile("Lambda", [0.0, 1.0], [L, L])
+        if self.spray is not None:
+            self.spray.set_initial_guess(self.flame)

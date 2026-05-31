@@ -100,6 +100,7 @@ cdef extern from "cantera/oneD/Flow1D.h":
         ThermoBasis fluxGradientBasis()
         void setFreeFlow()
         void setAxisymmetricFlow()
+        void setUnstrainedFlow()
         void enableTwoPointControl(cbool) except +translate_exception
         cbool twoPointControlEnabled()
         double leftControlPointTemperature() except +translate_exception
@@ -108,6 +109,30 @@ cdef extern from "cantera/oneD/Flow1D.h":
         double rightControlPointTemperature() except +translate_exception
         double rightControlPointCoordinate() except +translate_exception
         void setRightControlPointTemperature(double) except +translate_exception
+
+
+cdef extern from "cantera/oneD/SprayFlow1D.h":
+    cdef cppclass CxxSprayFlow1D "Cantera::SprayFlow1D" (CxxFlow1D):
+        void setSprayFuel(const string&) except +translate_exception
+        string sprayFuel()
+        void setLiquidProperties(double, double, double, double, double) except +translate_exception
+        void setDropletDiameter(double) except +translate_exception
+        void setLiquidMassDensity(double) except +translate_exception
+        void setLiquidMassFlux(double) except +translate_exception
+        void setLiquidTemperature(double) except +translate_exception
+        void setDropletVelocity(double) except +translate_exception
+        void setDropletSpreadRate(double) except +translate_exception
+        void setSprayInlet(int) except +translate_exception
+        int sprayInlet()
+        void setFreeFlowNoSlip(cbool)
+        cbool freeFlowNoSlip()
+        double sprayEvaporationRate(size_t) except +translate_exception
+        double sprayHeatTransferRate(size_t) except +translate_exception
+        double sprayGasEnergySource(size_t) except +translate_exception
+        double dropletDiameter(size_t) except +translate_exception
+        double dropletReynoldsNumber(size_t) except +translate_exception
+        double dropletNusseltNumber(size_t) except +translate_exception
+        double dropletSherwoodNumber(size_t) except +translate_exception
 
 
 cdef extern from "cantera/oneD/Sim1D.h":
@@ -185,6 +210,18 @@ cdef class ReactingSurface1D(Boundary1D):
 
 cdef class FlowBase(Domain1D):
     cdef CxxFlow1D* flow
+
+cdef class SprayFlowBase(FlowBase):
+    cdef CxxSprayFlow1D* spray_flow(self)
+
+cdef class SprayFreeFlow(SprayFlowBase):
+    pass
+
+cdef class SprayUnstrainedFlow(SprayFlowBase):
+    pass
+
+cdef class SprayAxisymmetricFlow(SprayFlowBase):
+    pass
 
 cdef class Sim1D:
     cdef shared_ptr[CxxSim1D] _sim
