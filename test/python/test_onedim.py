@@ -241,6 +241,53 @@ class TestMonodisperseSpray:
         assert sim.flame.droplet_velocity == approx(sim.flame.velocity)
         assert sim.flame.droplet_diameter[-1] < sim.flame.droplet_diameter[0]
 
+    def test_free_flame_solve_zero_loading_cryogenic_liquid(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "H2:0.8, O2:0.4, AR:3.76"
+        spray = self.make_spray(
+            diameter=1e-3,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=20.0,
+            liquid_mass_density=0.0,
+            minimum_droplet_diameter=1e-6,
+        )
+
+        sim = ct.FreeFlame(gas, width=0.015, spray=spray)
+        sim.set_initial_guess()
+        sim.energy_enabled = True
+        sim.solve(loglevel=0, refine_grid=False, auto=False)
+
+        assert max(sim.T) > 1000.0
+        assert np.allclose(sim.flame.evaporation_rate, 0.0)
+        assert sim.flame.droplet_temperature == approx(20.0)
+
+    def test_free_flame_tiny_spray_auto_dryout(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "H2:0.8, O2:0.4, AR:3.76"
+        spray = self.make_spray(
+            diameter=100e-6,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            liquid_mass_density=1e-12,
+            minimum_droplet_diameter=1e-6,
+        )
+
+        sim = ct.FreeFlame(gas, width=0.015, spray=spray)
+        sim.set_initial_guess()
+        sim.energy_enabled = False
+        sim.solve(loglevel=0, refine_grid=False, auto=True)
+
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert min(sim.flame.droplet_diameter) == approx(
+            spray.minimum_droplet_diameter)
+        assert max(sim.flame.droplet_temperature) <= spray.boiling_temperature
+
     def test_dryout_cutoff(self):
         gas = ct.Solution("h2o2.yaml")
         gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"

@@ -18,6 +18,8 @@ namespace Cantera
 namespace
 {
 
+constexpr double MinDropletTemperature = 1.0;
+
 string normalizeComponentName(const string& name)
 {
     if (name == "liquid_mass_density") {
@@ -198,7 +200,12 @@ void SprayFlow1D::setSprayBounds()
     setBounds(dropletMassIndex(), minimumDropletMass(), 1e20);
     setBounds(dropletVelocityIndex(), -1e20, 1e20);
     setBounds(dropletSpreadRateIndex(), -1e20, 1e20);
-    setBounds(dropletTemperatureIndex(), 150.0, 2*m_thermo->maxTemp());
+    double maxDropletTemperature = 2*m_thermo->maxTemp();
+    const auto& liquid = m_sprayModel.liquidProperties();
+    if (liquid.boilingTemperature != Undef && liquid.boilingTemperature > 0.0) {
+        maxDropletTemperature = liquid.boilingTemperature;
+    }
+    setBounds(dropletTemperatureIndex(), MinDropletTemperature, maxDropletTemperature);
 
     setSteadyTolerances(1e-5, 1e-12, liquidMassDensityIndex());
     setSteadyTolerances(1e-5, 1e-18, dropletMassIndex());
@@ -248,7 +255,7 @@ void SprayFlow1D::resetBadValues(span<double> xg)
         x[index(dropletMassIndex(), j)] =
             std::max(x[index(dropletMassIndex(), j)], minimumDropletMass());
         x[index(dropletTemperatureIndex(), j)] =
-            std::max(x[index(dropletTemperatureIndex(), j)], 150.0);
+            std::max(x[index(dropletTemperatureIndex(), j)], MinDropletTemperature);
     }
 }
 
@@ -411,10 +418,34 @@ void SprayFlow1D::updateSpraySources(span<const double> x, size_t jmin, size_t j
             continue;
         }
 
+        const auto& liquid = m_sprayModel.liquidProperties();
+        double dropletTemp = std::min(dropletTemperature(x, j),
+                                      liquid.boilingTemperature);
+
         setGas(x, j);
         auto result = m_sprayModel.eval(*m_thermo, *m_trans, m_fuelIndex, mass,
-            dropletTemperature(x, j), dropletVelocity(x, j), u(x, j),
+            dropletTemp, dropletVelocity(x, j), u(x, j),
             dropletSpreadRate(x, j), V(x, j));
+
+        double minMass = minimumDropletMass();
+        double ud = dropletVelocity(x, j);
+        if (minMass > 0.0 && result.evaporationRate > 0.0 && ud != 0.0) {
+            bool hasUpstream = (ud > 0.0 && j > 0) || (ud < 0.0 && j + 1 < m_points);
+            if (hasUpstream) {
+                size_t jUp = ud > 0.0 ? j - 1 : j + 1;
+                double dz = ud > 0.0 ? m_dz[j - 1] : m_dz[j];
+                double availableMass = std::max(dropletMass(x, jUp) - minMass, 0.0);
+                double maxEvaporationRate = availableMass * fabs(ud) / std::max(dz, Tiny);
+                if (result.evaporationRate > maxEvaporationRate) {
+                    double scale = maxEvaporationRate / result.evaporationRate;
+                    result.evaporationRate = maxEvaporationRate;
+                    result.heatTransferRate *= scale;
+                    result.dragAxial *= scale;
+                    result.dragSpreadRate *= scale;
+                }
+            }
+        }
+
         double numberDensity = rhoLiquid / mass;
         double massSource = numberDensity * result.evaporationRate;
 
@@ -499,7 +530,11 @@ double SprayFlow1D::minimumDropletMass() const
 bool SprayFlow1D::dropletIsDry(span<const double> x, size_t j) const
 {
     double minMass = minimumDropletMass();
-    return minMass > 0.0 && dropletMass(x, j) <= minMass * (1.0 + 1e-8);
+    bool hasLiquidInlet = (m_inletLiquidMassDensity != Undef
+                           && m_inletLiquidMassDensity > 0.0)
+        || (m_inletLiquidMassFlux != Undef && m_inletLiquidMassFlux > 0.0);
+    return (hasLiquidInlet && liquidMassDensity(x, j) <= 0.0)
+        || (minMass > 0.0 && dropletMass(x, j) <= minMass * (1.0 + 1e-8));
 }
 
 void SprayFlow1D::checkDropletReversal(span<const double> x, size_t j) const
@@ -602,6 +637,7 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
     size_t j1 = std::min(jmax, m_points-2);
     for (size_t j = j0; j <= j1; j++) {
         if (dropletIsDry(x, j)) {
+            const auto& liquid = m_sprayModel.liquidProperties();
             rsd[index(iRho, j)] = liquidMassDensity(x, j);
             diag[index(iRho, j)] = 0;
             rsd[index(iMass, j)] = dropletMass(x, j) - minimumDropletMass();
@@ -610,7 +646,8 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
             diag[index(iVelocity, j)] = 0;
             rsd[index(iSpread, j)] = dropletSpreadRate(x, j);
             diag[index(iSpread, j)] = 0;
-            rsd[index(iTemp, j)] = dropletTemperature(x, j) - T(x, j);
+            rsd[index(iTemp, j)] = dropletTemperature(x, j)
+                - liquid.boilingTemperature;
             diag[index(iTemp, j)] = 0;
             continue;
         }
@@ -654,15 +691,21 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
             diag[index(iSpread, j)] = 0;
         }
 
-        double heatPerDroplet = numberDensity > 0.0
-            ? m_sprayHeatTransfer[j] / numberDensity : 0.0;
         const auto& liquid = m_sprayModel.liquidProperties();
-        rsd[index(iTemp, j)] = (heatPerDroplet
-            - singleDropletEvaporation * liquid.latentHeat)
-            / (mass * liquid.cp)
-            - dropletVelocity(x, j) * dropletDerivative(x, iTemp, j)
-            - rdt * (dropletTemperature(x, j) - prevSoln(iTemp, j));
-        diag[index(iTemp, j)] = 1;
+        if (dropletTemperature(x, j) >= liquid.boilingTemperature) {
+            rsd[index(iTemp, j)] = dropletTemperature(x, j)
+                - liquid.boilingTemperature;
+            diag[index(iTemp, j)] = 0;
+        } else {
+            double heatPerDroplet = numberDensity > 0.0
+                ? m_sprayHeatTransfer[j] / numberDensity : 0.0;
+            rsd[index(iTemp, j)] = (heatPerDroplet
+                - singleDropletEvaporation * liquid.latentHeat)
+                / (mass * liquid.cp)
+                - dropletVelocity(x, j) * dropletDerivative(x, iTemp, j)
+                - rdt * (dropletTemperature(x, j) - prevSoln(iTemp, j));
+            diag[index(iTemp, j)] = 1;
+        }
     }
 }
 

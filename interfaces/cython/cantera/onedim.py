@@ -623,6 +623,7 @@ class MonodisperseSpray:
     def set_initial_guess(self, flow):
         zrel = (flow.grid - flow.grid[0]) / (flow.grid[-1] - flow.grid[0])
         mass = np.pi / 6 * self.liquid_density * self.diameter**3
+        min_mass = np.pi / 6 * self.liquid_density * self.minimum_droplet_diameter**3
 
         if flow.type == "spray-free-flow" and flow.free_flow_no_slip:
             velocity = flow.velocity
@@ -637,14 +638,36 @@ class MonodisperseSpray:
         else:
             liquid_density = np.full(flow.n_points, self.liquid_mass_density)
 
+        has_loading = (
+            (self.liquid_mass_density is not None and self.liquid_mass_density > 0.0)
+            or (self.liquid_mass_flux is not None and self.liquid_mass_flux > 0.0)
+        )
+        gas_temperature = flow.values("T")
+        if has_loading and flow.type == "spray-free-flow":
+            # Seed dried droplets in hot regions so Newton starts near the
+            # bounded dryout state instead of driving through the mass floor.
+            dry_progress = np.clip(
+                (gas_temperature - self.boiling_temperature) / 200.0,
+                0.0, 1.0,
+            )
+        else:
+            dry_progress = np.zeros(flow.n_points)
+        droplet_mass = mass - dry_progress * (mass - min_mass)
+        if mass > min_mass:
+            liquid_density *= (droplet_mass - min_mass) / (mass - min_mass)
+        if has_loading and flow.type == "spray-free-flow":
+            droplet_temperature = np.clip(
+                gas_temperature, self.liquid_temperature, self.boiling_temperature)
+        else:
+            droplet_temperature = np.full(flow.n_points, self.liquid_temperature)
+
         flow.set_profile("liquid-mass-density", zrel, liquid_density)
-        flow.set_profile("droplet-mass", zrel, np.full(flow.n_points, mass))
+        flow.set_profile("droplet-mass", zrel, droplet_mass)
         flow.set_profile("droplet-velocity", zrel, velocity)
         if flow.type == "spray-axisymmetric-flow":
             flow.set_profile("droplet-spread-rate", zrel,
                              np.full(flow.n_points, self.droplet_spread_rate))
-        flow.set_profile("droplet-temperature", zrel,
-                         np.full(flow.n_points, self.liquid_temperature))
+        flow.set_profile("droplet-temperature", zrel, droplet_temperature)
 
 
 def _coerce_spray(spray):
@@ -781,6 +804,47 @@ class FreeFlame(FlameBase):
         """
         if not auto:
             return super().solve(loglevel, refine_grid, auto)
+
+        if self.spray is not None:
+            has_loading = (
+                (self.spray.liquid_mass_density is not None
+                 and self.spray.liquid_mass_density > 0.0)
+                or (self.spray.liquid_mass_flux is not None
+                    and self.spray.liquid_mass_flux > 0.0)
+            )
+            if has_loading:
+                spray = self.spray
+                zero_spray = MonodisperseSpray(
+                    fuel_species=spray.fuel_species,
+                    diameter=spray.diameter,
+                    liquid_density=spray.liquid_density,
+                    liquid_cp=spray.liquid_cp,
+                    latent_heat=spray.latent_heat,
+                    boiling_temperature=spray.boiling_temperature,
+                    liquid_temperature=spray.liquid_temperature,
+                    liquid_mass_density=0.0,
+                    droplet_velocity=spray.droplet_velocity,
+                    droplet_spread_rate=spray.droplet_spread_rate,
+                    saturation_pressure=spray.saturation_pressure,
+                    minimum_droplet_diameter=spray.minimum_droplet_diameter,
+                    droplet_reversal_check=spray.droplet_reversal_check,
+                )
+                self.spray = zero_spray
+                zero_spray.apply(self.flame)
+                zero_spray.set_initial_guess(self.flame)
+                try:
+                    super().solve(loglevel, refine_grid, auto=True)
+                except Exception:
+                    self.spray = spray
+                    spray.apply(self.flame)
+                    raise
+
+                self.spray = spray
+                spray.apply(self.flame)
+                self.spray.set_initial_guess(self.flame)
+                return super().solve(loglevel, refine_grid, auto=False)
+
+            self.spray.set_initial_guess(self.flame)
 
         # Use a callback function to check that the domain is actually wide
         # enough to contain the flame after each steady-state solve. If the user
