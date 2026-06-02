@@ -1169,6 +1169,15 @@ cdef class SprayFlowBase(FlowBase):
         return data
 
     @property
+    def spray_gas_momentum_source(self):
+        """Gas radial momentum source term induced by the spray [N/m^3]."""
+        cdef int j
+        cdef np.ndarray[np.double_t, ndim=1] data = np.empty(self.n_points)
+        for j in range(self.n_points):
+            data[j] = self.spray_flow().sprayGasMomentumSource(j)
+        return data
+
+    @property
     def droplet_diameter(self):
         """Droplet diameter [m]."""
         cdef int j

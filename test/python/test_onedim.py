@@ -326,6 +326,8 @@ class TestMonodisperseSpray:
         sim.eval()
 
         assert np.all(sim.flame.evaporation_rate > 0.0)
+        assert sim.flame.spray_gas_momentum_source.shape == sim.grid.shape
+        assert np.all(np.isfinite(sim.flame.spray_gas_momentum_source))
         assert np.all(sim.flame.droplet_diameter > 0.0)
         assert "liquid-mass-density" in sim.flame.component_names
 

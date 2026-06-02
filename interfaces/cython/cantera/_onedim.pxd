@@ -159,6 +159,7 @@ cdef extern from "cantera/oneD/SprayFlow1D.h":
         double sprayEvaporationRate(size_t) except +translate_exception
         double sprayHeatTransferRate(size_t) except +translate_exception
         double sprayGasEnergySource(size_t) except +translate_exception
+        double sprayGasMomentumSource(size_t) except +translate_exception
         double dropletDiameter(size_t) except +translate_exception
         double dropletReynoldsNumber(size_t) except +translate_exception
         double dropletNusseltNumber(size_t) except +translate_exception

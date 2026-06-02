@@ -268,6 +268,11 @@ public:
         return m_sprayEnergySource[j];
     }
 
+    //! Gas radial momentum source term induced by the spray [N/m^3].
+    double sprayGasMomentumSource(size_t j) const {
+        return m_sprayMomentumSource[j];
+    }
+
     //! Droplet diameter at a grid point [m].
     double dropletDiameter(size_t j) const {
         return m_sprayModel.diameter(dropletMass(j));
