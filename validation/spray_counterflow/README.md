@@ -51,9 +51,36 @@ counterflow equations:
   gas spread rate while droplets are wet
 - spread drag reduces liquid loading and liquid flux relative to axial-only drag
 
+`validate_gas_feedback.py` validates nonreacting gas feedback over the full
+droplet-drag counterflow solution:
+
+- gas continuity feedback is enabled first, with species, energy, and gas
+  momentum feedback disabled
+- species feedback is then enabled and produces a smooth methane vapor profile
+  while preserving species normalization
+- radial momentum feedback is enabled last and reduces the gas spread rate in
+  the injector-side region where the spray momentum source is negative
+- the gas energy equation is then enabled with spray energy feedback disabled,
+  followed by a final solve with spray energy feedback enabled
+
+The checks are conservative:
+
+- without gas mass feedback, the axisymmetric gas continuity residual is small
+  only when the evaporation source is omitted
+- with gas mass feedback, the same residual is small only when the evaporation
+  source is included
+- mass-only feedback leaves methane absent from the gas phase
+- species feedback gives a positive methane vapor profile
+- momentum feedback changes gas spread rate with the sign implied by the radial
+  spray momentum source
+- with energy enabled and spray energy feedback disabled, the gas remains at the
+  300 K boundary temperature
+- enabling spray energy feedback gives a negative gas energy source and a
+  resolved gas-temperature depression in the wet source region
+
 ## Not yet validated
 
-Gas-phase two-way feedback, energy-coupled gaseous flames, and the final
-user-facing automatic staging are still open. The current drag validations use
-explicit staged initial guesses; that is a validation harness, not yet the
-intended Python-only workflow.
+Reacting energy-coupled gaseous flames and the final user-facing automatic
+staging are still open. The current drag and feedback validations use explicit
+staged initial guesses; that is a validation harness, not yet the intended
+Python-only workflow.
