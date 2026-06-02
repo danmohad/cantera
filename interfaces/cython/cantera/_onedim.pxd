@@ -130,6 +130,32 @@ cdef extern from "cantera/oneD/SprayFlow1D.h":
         cbool freeFlowNoSlip()
         void setDropletReversalCheck(cbool)
         cbool dropletReversalCheck()
+        void setGasPhaseSpraySourcesEnabled(cbool)
+        cbool gasPhaseSpraySourcesEnabled()
+        void setGasPhaseSprayMassSourceEnabled(cbool)
+        cbool gasPhaseSprayMassSourceEnabled()
+        void setGasPhaseSpraySpeciesSourceEnabled(cbool)
+        cbool gasPhaseSpraySpeciesSourceEnabled()
+        void setGasPhaseSprayEnergySourceEnabled(cbool)
+        cbool gasPhaseSprayEnergySourceEnabled()
+        void setGasPhaseSprayMomentumSourceEnabled(cbool)
+        cbool gasPhaseSprayMomentumSourceEnabled()
+        void setDropletSourcesEnabled(cbool)
+        cbool dropletSourcesEnabled()
+        void setDropletEvaporationEnabled(cbool)
+        cbool dropletEvaporationEnabled()
+        void setDropletHeatTransferEnabled(cbool)
+        cbool dropletHeatTransferEnabled()
+        void setDropletDragEnabled(cbool)
+        cbool dropletDragEnabled()
+        void setDropletAxialDragEnabled(cbool)
+        cbool dropletAxialDragEnabled()
+        void setDropletAxialDragMultiplier(double) except +translate_exception
+        double dropletAxialDragMultiplier()
+        void setDropletSpreadDragEnabled(cbool)
+        cbool dropletSpreadDragEnabled()
+        void setDropletSpreadDragMultiplier(double) except +translate_exception
+        double dropletSpreadDragMultiplier()
         double sprayEvaporationRate(size_t) except +translate_exception
         double sprayHeatTransferRate(size_t) except +translate_exception
         double sprayGasEnergySource(size_t) except +translate_exception

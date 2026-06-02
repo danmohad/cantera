@@ -177,6 +177,7 @@ void SprayFlow1D::setSprayInlet(int side)
             "Spray inlet side must be 0 (left) or 1 (right).");
     }
     m_inletSide = side;
+    setSprayBounds();
     needJacUpdate();
 }
 
@@ -198,7 +199,13 @@ void SprayFlow1D::setSprayBounds()
 {
     setBounds(liquidMassDensityIndex(), 0.0, 1e20);
     setBounds(dropletMassIndex(), minimumDropletMass(), 1e20);
-    setBounds(dropletVelocityIndex(), -1e20, 1e20);
+    if (!m_checkDropletReversal) {
+        setBounds(dropletVelocityIndex(), -1e20, 1e20);
+    } else if (m_inletSide == 0) {
+        setBounds(dropletVelocityIndex(), 0.0, 1e20);
+    } else {
+        setBounds(dropletVelocityIndex(), -1e20, 0.0);
+    }
     setBounds(dropletSpreadRateIndex(), -1e20, 1e20);
     double maxDropletTemperature = 2*m_thermo->maxTemp();
     const auto& liquid = m_sprayModel.liquidProperties();
@@ -215,8 +222,8 @@ void SprayFlow1D::setSprayBounds()
 
     m_refiner->setActive(liquidMassDensityIndex(), true);
     m_refiner->setActive(dropletMassIndex(), true);
-    m_refiner->setActive(dropletVelocityIndex(), false);
-    m_refiner->setActive(dropletSpreadRateIndex(), false);
+    m_refiner->setActive(dropletVelocityIndex(), m_enableDropletAxialDrag);
+    m_refiner->setActive(dropletSpreadRateIndex(), m_enableDropletSpreadDrag);
     m_refiner->setActive(dropletTemperatureIndex(), true);
 }
 
@@ -344,6 +351,16 @@ AnyMap SprayFlow1D::getMeta() const
     spray["inlet-side"] = m_inletSide;
     spray["free-flow-no-slip"] = m_freeFlowNoSlip;
     spray["droplet-reversal-check"] = m_checkDropletReversal;
+    spray["gas-phase-mass-source"] = m_enableGasPhaseMassSource;
+    spray["gas-phase-species-source"] = m_enableGasPhaseSpeciesSource;
+    spray["gas-phase-energy-source"] = m_enableGasPhaseEnergySource;
+    spray["gas-phase-momentum-source"] = m_enableGasPhaseMomentumSource;
+    spray["droplet-evaporation"] = m_enableDropletEvaporation;
+    spray["droplet-heat-transfer"] = m_enableDropletHeatTransfer;
+    spray["droplet-axial-drag"] = m_enableDropletAxialDrag;
+    spray["droplet-spread-drag"] = m_enableDropletSpreadDrag;
+    spray["droplet-axial-drag-multiplier"] = m_dropletAxialDragMultiplier;
+    spray["droplet-spread-drag-multiplier"] = m_dropletSpreadDragMultiplier;
 
     const auto& liquid = m_sprayModel.liquidProperties();
     spray["liquid-density"] = liquid.density;
@@ -387,6 +404,21 @@ void SprayFlow1D::setMeta(const AnyMap& state)
     setSprayInlet(spray.getInt("inlet-side", 0));
     m_freeFlowNoSlip = spray.getBool("free-flow-no-slip", true);
     m_checkDropletReversal = spray.getBool("droplet-reversal-check", true);
+    m_enableGasPhaseMassSource = spray.getBool("gas-phase-mass-source", true);
+    m_enableGasPhaseSpeciesSource = spray.getBool("gas-phase-species-source", true);
+    m_enableGasPhaseEnergySource = spray.getBool("gas-phase-energy-source", true);
+    m_enableGasPhaseMomentumSource = spray.getBool("gas-phase-momentum-source", true);
+    m_enableDropletEvaporation = spray.getBool("droplet-evaporation", true);
+    m_enableDropletHeatTransfer = spray.getBool("droplet-heat-transfer", true);
+    bool dropletDrag = spray.getBool("droplet-drag", true);
+    m_enableDropletAxialDrag = spray.getBool("droplet-axial-drag", dropletDrag);
+    m_enableDropletSpreadDrag = spray.getBool("droplet-spread-drag", dropletDrag);
+    m_dropletAxialDragMultiplier =
+        spray.getDouble("droplet-axial-drag-multiplier", 1.0);
+    m_dropletSpreadDragMultiplier =
+        spray.getDouble("droplet-spread-drag-multiplier", 1.0);
+    setSprayBounds();
+    needJacUpdate();
 }
 
 void SprayFlow1D::updateProperties(size_t jg, span<const double> x,
@@ -430,19 +462,28 @@ void SprayFlow1D::updateSpraySources(span<const double> x, size_t jmin, size_t j
         double minMass = minimumDropletMass();
         double ud = dropletVelocity(x, j);
         if (minMass > 0.0 && result.evaporationRate > 0.0 && ud != 0.0) {
-            bool hasUpstream = (ud > 0.0 && j > 0) || (ud < 0.0 && j + 1 < m_points);
-            if (hasUpstream) {
-                size_t jUp = ud > 0.0 ? j - 1 : j + 1;
-                double dz = ud > 0.0 ? m_dz[j - 1] : m_dz[j];
-                double availableMass = std::max(dropletMass(x, jUp) - minMass, 0.0);
-                double maxEvaporationRate = availableMass * fabs(ud) / std::max(dz, Tiny);
-                if (result.evaporationRate > maxEvaporationRate) {
-                    double scale = maxEvaporationRate / result.evaporationRate;
-                    result.evaporationRate = maxEvaporationRate;
-                    result.heatTransferRate *= scale;
-                    result.dragAxial *= scale;
-                    result.dragSpreadRate *= scale;
-                }
+            double dz = m_dz.front();
+            double upstreamMass = mass;
+            if (ud > 0.0 && j > 0) {
+                dz = m_dz[j - 1];
+                upstreamMass = dropletMass(x, j - 1);
+            } else if (ud < 0.0 && j + 1 < m_points) {
+                dz = m_dz[j];
+                upstreamMass = dropletMass(x, j + 1);
+            } else if (j > 0) {
+                dz = m_dz[j - 1];
+            }
+            double availableMass = std::max(upstreamMass - minMass, 0.0);
+            double maxEvaporationRate = availableMass * fabs(ud) / std::max(dz, Tiny);
+            if (result.evaporationRate > maxEvaporationRate) {
+                double limitedEvaporationRate = result.evaporationRate
+                    * maxEvaporationRate
+                    / (result.evaporationRate + maxEvaporationRate);
+                double scale = limitedEvaporationRate / result.evaporationRate;
+                result.evaporationRate = limitedEvaporationRate;
+                result.heatTransferRate *= scale;
+                result.dragAxial *= scale;
+                result.dragSpreadRate *= scale;
             }
         }
 
@@ -470,12 +511,15 @@ void SprayFlow1D::updateSpraySources(span<const double> x, size_t jmin, size_t j
 
 double SprayFlow1D::continuitySource(span<const double> x, size_t j) const
 {
+    if (!m_enableGasPhaseMassSource) {
+        return 0.0;
+    }
     return m_sprayMassSource[j];
 }
 
 double SprayFlow1D::momentumSource(span<const double> x, size_t j) const
 {
-    if (!isStrained()) {
+    if (!isStrained() || !m_enableGasPhaseMomentumSource) {
         return 0.0;
     }
     return m_sprayMomentumSource[j];
@@ -483,11 +527,17 @@ double SprayFlow1D::momentumSource(span<const double> x, size_t j) const
 
 double SprayFlow1D::energySource(span<const double> x, size_t j) const
 {
+    if (!m_enableGasPhaseEnergySource) {
+        return 0.0;
+    }
     return m_sprayEnergySource[j];
 }
 
 double SprayFlow1D::speciesSource(span<const double> x, size_t k, size_t j) const
 {
+    if (!m_enableGasPhaseSpeciesSource) {
+        return 0.0;
+    }
     if (k == m_fuelIndex) {
         return m_sprayMassSource[j] * (1.0 - Y(x, k, j));
     }
@@ -511,6 +561,16 @@ double SprayFlow1D::dropletDerivative(span<const double> x, size_t component,
     size_t jloc = (ud > 0.0 ? j : j + 1);
     return (x[index(component, jloc)] - x[index(component, jloc-1)])
         / m_dz[jloc-1];
+}
+
+double SprayFlow1D::dropletVelocityGradientTerm(span<const double> x, size_t j) const
+{
+    checkDropletReversal(x, j);
+    double ud = dropletVelocity(x, j);
+    size_t jloc = (ud > 0.0 ? j : j + 1);
+    double uRight = dropletVelocity(x, jloc);
+    double uLeft = dropletVelocity(x, jloc - 1);
+    return 0.5 * (uRight * uRight - uLeft * uLeft) / m_dz[jloc - 1];
 }
 
 double SprayFlow1D::liquidMassFlux(span<const double> x, size_t j) const
@@ -638,11 +698,14 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
     for (size_t j = j0; j <= j1; j++) {
         if (dropletIsDry(x, j)) {
             const auto& liquid = m_sprayModel.liquidProperties();
+            size_t jup = (m_inletSide == 0) ? j - 1 : j + 1;
+            double dryVelocity = (m_isFree && m_freeFlowNoSlip)
+                ? u(x, j) : dropletVelocity(x, jup);
             rsd[index(iRho, j)] = liquidMassDensity(x, j);
             diag[index(iRho, j)] = 0;
             rsd[index(iMass, j)] = dropletMass(x, j) - minimumDropletMass();
             diag[index(iMass, j)] = 0;
-            rsd[index(iVelocity, j)] = dropletVelocity(x, j) - u(x, j);
+            rsd[index(iVelocity, j)] = dropletVelocity(x, j) - dryVelocity;
             diag[index(iVelocity, j)] = 0;
             rsd[index(iSpread, j)] = dropletSpreadRate(x, j);
             diag[index(iSpread, j)] = 0;
@@ -655,16 +718,19 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
         double dz = dropletVelocity(x, j) > 0.0 ? m_dz[j-1] : m_dz[j];
         double upstreamFlux = dropletVelocity(x, j) > 0.0
             ? liquidMassFlux(x, j-1) : liquidMassFlux(x, j+1);
+        double dropletMassSource = m_enableDropletEvaporation
+            ? m_sprayMassSource[j] : 0.0;
         rsd[index(iRho, j)] = -(liquidMassFlux(x, j) - upstreamFlux) / dz
             - 2.0 * liquidMassDensity(x, j) * dropletSpreadRate(x, j)
-            - m_sprayMassSource[j]
+            - dropletMassSource
             - rdt * (liquidMassDensity(x, j) - prevSoln(iRho, j));
         diag[index(iRho, j)] = 1;
 
         double mass = std::max(dropletMass(x, j), Tiny);
         double numberDensity = liquidMassDensity(x, j) / mass;
-        double singleDropletEvaporation = numberDensity > 0.0
-            ? m_sprayMassSource[j] / numberDensity : 0.0;
+        double singleDropletEvaporation =
+            (m_enableDropletEvaporation && numberDensity > 0.0)
+            ? dropletMassSource / numberDensity : 0.0;
         rsd[index(iMass, j)] = -dropletVelocity(x, j)
             * dropletDerivative(x, iMass, j) - singleDropletEvaporation
             - rdt * (dropletMass(x, j) - prevSoln(iMass, j));
@@ -674,14 +740,20 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
             rsd[index(iVelocity, j)] = dropletVelocity(x, j) - u(x, j);
             diag[index(iVelocity, j)] = 0;
         } else {
-            rsd[index(iVelocity, j)] = m_dropletAxialDrag[j] / mass
-                - dropletVelocity(x, j) * dropletDerivative(x, iVelocity, j)
+            rsd[index(iVelocity, j)] =
+                (m_enableDropletAxialDrag
+                 ? m_dropletAxialDragMultiplier * m_dropletAxialDrag[j] / mass
+                 : 0.0)
+                - dropletVelocityGradientTerm(x, j)
                 - rdt * (dropletVelocity(x, j) - prevSoln(iVelocity, j));
             diag[index(iVelocity, j)] = 1;
         }
 
         if (isStrained()) {
-            rsd[index(iSpread, j)] = m_dropletSpreadDrag[j] / mass
+            rsd[index(iSpread, j)] =
+                (m_enableDropletSpreadDrag
+                 ? m_dropletSpreadDragMultiplier * m_dropletSpreadDrag[j] / mass
+                 : 0.0)
                 - dropletVelocity(x, j) * dropletDerivative(x, iSpread, j)
                 - dropletSpreadRate(x, j) * dropletSpreadRate(x, j)
                 - rdt * (dropletSpreadRate(x, j) - prevSoln(iSpread, j));
@@ -697,7 +769,7 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
                 - liquid.boilingTemperature;
             diag[index(iTemp, j)] = 0;
         } else {
-            double heatPerDroplet = numberDensity > 0.0
+            double heatPerDroplet = (m_enableDropletHeatTransfer && numberDensity > 0.0)
                 ? m_sprayHeatTransfer[j] / numberDensity : 0.0;
             rsd[index(iTemp, j)] = (heatPerDroplet
                 - singleDropletEvaporation * liquid.latentHeat)

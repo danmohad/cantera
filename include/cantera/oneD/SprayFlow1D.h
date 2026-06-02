@@ -80,11 +80,177 @@ public:
     //! Set whether droplet axial reversal raises an error.
     void setDropletReversalCheck(bool check) {
         m_checkDropletReversal = check;
+        setSprayBounds();
+        needJacUpdate();
     }
 
     //! Return whether droplet axial reversal raises an error.
     bool dropletReversalCheck() const {
         return m_checkDropletReversal;
+    }
+
+    //! Enable or disable all spray source terms in the gas-phase equations.
+    void setGasPhaseSpraySourcesEnabled(bool enabled) {
+        m_enableGasPhaseMassSource = enabled;
+        m_enableGasPhaseSpeciesSource = enabled;
+        m_enableGasPhaseEnergySource = enabled;
+        m_enableGasPhaseMomentumSource = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether all spray source terms are enabled in gas equations.
+    bool gasPhaseSpraySourcesEnabled() const {
+        return m_enableGasPhaseMassSource && m_enableGasPhaseSpeciesSource
+            && m_enableGasPhaseEnergySource && m_enableGasPhaseMomentumSource;
+    }
+
+    //! Enable or disable the spray continuity source in the gas phase.
+    void setGasPhaseSprayMassSourceEnabled(bool enabled) {
+        m_enableGasPhaseMassSource = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether the spray continuity source is enabled in the gas phase.
+    bool gasPhaseSprayMassSourceEnabled() const {
+        return m_enableGasPhaseMassSource;
+    }
+
+    //! Enable or disable spray species source terms in the gas phase.
+    void setGasPhaseSpraySpeciesSourceEnabled(bool enabled) {
+        m_enableGasPhaseSpeciesSource = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether spray species source terms are enabled in the gas phase.
+    bool gasPhaseSpraySpeciesSourceEnabled() const {
+        return m_enableGasPhaseSpeciesSource;
+    }
+
+    //! Enable or disable the spray energy source in the gas phase.
+    void setGasPhaseSprayEnergySourceEnabled(bool enabled) {
+        m_enableGasPhaseEnergySource = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether the spray energy source is enabled in the gas phase.
+    bool gasPhaseSprayEnergySourceEnabled() const {
+        return m_enableGasPhaseEnergySource;
+    }
+
+    //! Enable or disable the spray momentum source in the gas phase.
+    void setGasPhaseSprayMomentumSourceEnabled(bool enabled) {
+        m_enableGasPhaseMomentumSource = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether the spray momentum source is enabled in the gas phase.
+    bool gasPhaseSprayMomentumSourceEnabled() const {
+        return m_enableGasPhaseMomentumSource;
+    }
+
+    //! Enable or disable all source terms in the droplet equations.
+    void setDropletSourcesEnabled(bool enabled) {
+        m_enableDropletEvaporation = enabled;
+        m_enableDropletHeatTransfer = enabled;
+        m_enableDropletAxialDrag = enabled;
+        m_enableDropletSpreadDrag = enabled;
+        setSprayBounds();
+        needJacUpdate();
+    }
+
+    //! Return whether all droplet-equation source terms are enabled.
+    bool dropletSourcesEnabled() const {
+        return m_enableDropletEvaporation && m_enableDropletHeatTransfer
+            && m_enableDropletAxialDrag && m_enableDropletSpreadDrag;
+    }
+
+    //! Enable or disable evaporation terms in liquid density and droplet mass.
+    void setDropletEvaporationEnabled(bool enabled) {
+        m_enableDropletEvaporation = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether evaporation terms are enabled in droplet equations.
+    bool dropletEvaporationEnabled() const {
+        return m_enableDropletEvaporation;
+    }
+
+    //! Enable or disable heat transfer in the droplet temperature equation.
+    void setDropletHeatTransferEnabled(bool enabled) {
+        m_enableDropletHeatTransfer = enabled;
+        needJacUpdate();
+    }
+
+    //! Return whether heat transfer is enabled in droplet equations.
+    bool dropletHeatTransferEnabled() const {
+        return m_enableDropletHeatTransfer;
+    }
+
+    //! Enable or disable drag in droplet velocity and spread-rate equations.
+    void setDropletDragEnabled(bool enabled) {
+        m_enableDropletAxialDrag = enabled;
+        m_enableDropletSpreadDrag = enabled;
+        setSprayBounds();
+        needJacUpdate();
+    }
+
+    //! Return whether drag is enabled in droplet equations.
+    bool dropletDragEnabled() const {
+        return m_enableDropletAxialDrag && m_enableDropletSpreadDrag;
+    }
+
+    //! Enable or disable axial drag in the droplet velocity equation.
+    void setDropletAxialDragEnabled(bool enabled) {
+        m_enableDropletAxialDrag = enabled;
+        setSprayBounds();
+        needJacUpdate();
+    }
+
+    //! Return whether axial drag is enabled in the droplet velocity equation.
+    bool dropletAxialDragEnabled() const {
+        return m_enableDropletAxialDrag;
+    }
+
+    //! Set multiplier for axial drag in the droplet velocity equation.
+    void setDropletAxialDragMultiplier(double multiplier) {
+        if (multiplier < 0.0) {
+            throw CanteraError("SprayFlow1D::setDropletAxialDragMultiplier",
+                "The axial drag multiplier must be non-negative.");
+        }
+        m_dropletAxialDragMultiplier = multiplier;
+        needJacUpdate();
+    }
+
+    //! Multiplier for axial drag in the droplet velocity equation.
+    double dropletAxialDragMultiplier() const {
+        return m_dropletAxialDragMultiplier;
+    }
+
+    //! Enable or disable radial drag in the droplet spread-rate equation.
+    void setDropletSpreadDragEnabled(bool enabled) {
+        m_enableDropletSpreadDrag = enabled;
+        setSprayBounds();
+        needJacUpdate();
+    }
+
+    //! Return whether radial drag is enabled in the droplet spread-rate equation.
+    bool dropletSpreadDragEnabled() const {
+        return m_enableDropletSpreadDrag;
+    }
+
+    //! Set multiplier for radial drag in the droplet spread-rate equation.
+    void setDropletSpreadDragMultiplier(double multiplier) {
+        if (multiplier < 0.0) {
+            throw CanteraError("SprayFlow1D::setDropletSpreadDragMultiplier",
+                "The spread-rate drag multiplier must be non-negative.");
+        }
+        m_dropletSpreadDragMultiplier = multiplier;
+        needJacUpdate();
+    }
+
+    //! Multiplier for radial drag in the droplet spread-rate equation.
+    double dropletSpreadDragMultiplier() const {
+        return m_dropletSpreadDragMultiplier;
     }
 
     //! Volumetric evaporation source term [kg/m^3/s].
@@ -186,6 +352,7 @@ protected:
 
     double dropletMass(size_t j) const;
     double dropletDerivative(span<const double> x, size_t component, size_t j) const;
+    double dropletVelocityGradientTerm(span<const double> x, size_t j) const;
     double liquidMassFlux(span<const double> x, size_t j) const;
     double minimumDropletMass() const;
     bool dropletIsDry(span<const double> x, size_t j) const;
@@ -211,6 +378,16 @@ protected:
     int m_inletSide = 0;
     bool m_freeFlowNoSlip = true;
     bool m_checkDropletReversal = true;
+    bool m_enableGasPhaseMassSource = true;
+    bool m_enableGasPhaseSpeciesSource = true;
+    bool m_enableGasPhaseEnergySource = true;
+    bool m_enableGasPhaseMomentumSource = true;
+    bool m_enableDropletEvaporation = true;
+    bool m_enableDropletHeatTransfer = true;
+    bool m_enableDropletAxialDrag = true;
+    bool m_enableDropletSpreadDrag = true;
+    double m_dropletAxialDragMultiplier = 1.0;
+    double m_dropletSpreadDragMultiplier = 1.0;
 
     vector<double> m_sprayMassSource;
     vector<double> m_sprayHeatTransfer;

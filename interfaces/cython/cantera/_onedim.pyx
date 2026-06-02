@@ -1025,6 +1025,123 @@ cdef class SprayFlowBase(FlowBase):
         return self.spray_flow().dropletReversalCheck()
 
     @property
+    def gas_phase_spray_sources_enabled(self):
+        """Whether all spray feedback sources are enabled in gas equations."""
+        return self.spray_flow().gasPhaseSpraySourcesEnabled()
+
+    @gas_phase_spray_sources_enabled.setter
+    def gas_phase_spray_sources_enabled(self, enabled):
+        self.spray_flow().setGasPhaseSpraySourcesEnabled(<cbool>enabled)
+
+    @property
+    def gas_phase_spray_mass_source_enabled(self):
+        """Whether spray mass feedback is enabled in the gas continuity equation."""
+        return self.spray_flow().gasPhaseSprayMassSourceEnabled()
+
+    @gas_phase_spray_mass_source_enabled.setter
+    def gas_phase_spray_mass_source_enabled(self, enabled):
+        self.spray_flow().setGasPhaseSprayMassSourceEnabled(<cbool>enabled)
+
+    @property
+    def gas_phase_spray_species_source_enabled(self):
+        """Whether spray feedback is enabled in gas species equations."""
+        return self.spray_flow().gasPhaseSpraySpeciesSourceEnabled()
+
+    @gas_phase_spray_species_source_enabled.setter
+    def gas_phase_spray_species_source_enabled(self, enabled):
+        self.spray_flow().setGasPhaseSpraySpeciesSourceEnabled(<cbool>enabled)
+
+    @property
+    def gas_phase_spray_energy_source_enabled(self):
+        """Whether spray feedback is enabled in the gas energy equation."""
+        return self.spray_flow().gasPhaseSprayEnergySourceEnabled()
+
+    @gas_phase_spray_energy_source_enabled.setter
+    def gas_phase_spray_energy_source_enabled(self, enabled):
+        self.spray_flow().setGasPhaseSprayEnergySourceEnabled(<cbool>enabled)
+
+    @property
+    def gas_phase_spray_momentum_source_enabled(self):
+        """Whether spray feedback is enabled in the gas momentum equation."""
+        return self.spray_flow().gasPhaseSprayMomentumSourceEnabled()
+
+    @gas_phase_spray_momentum_source_enabled.setter
+    def gas_phase_spray_momentum_source_enabled(self, enabled):
+        self.spray_flow().setGasPhaseSprayMomentumSourceEnabled(<cbool>enabled)
+
+    @property
+    def droplet_sources_enabled(self):
+        """Whether all source terms are enabled in the droplet equations."""
+        return self.spray_flow().dropletSourcesEnabled()
+
+    @droplet_sources_enabled.setter
+    def droplet_sources_enabled(self, enabled):
+        self.spray_flow().setDropletSourcesEnabled(<cbool>enabled)
+
+    @property
+    def droplet_evaporation_enabled(self):
+        """Whether evaporation is enabled in droplet mass equations."""
+        return self.spray_flow().dropletEvaporationEnabled()
+
+    @droplet_evaporation_enabled.setter
+    def droplet_evaporation_enabled(self, enabled):
+        self.spray_flow().setDropletEvaporationEnabled(<cbool>enabled)
+
+    @property
+    def droplet_heat_transfer_enabled(self):
+        """Whether heat transfer is enabled in the droplet temperature equation."""
+        return self.spray_flow().dropletHeatTransferEnabled()
+
+    @droplet_heat_transfer_enabled.setter
+    def droplet_heat_transfer_enabled(self, enabled):
+        self.spray_flow().setDropletHeatTransferEnabled(<cbool>enabled)
+
+    @property
+    def droplet_drag_enabled(self):
+        """Whether drag is enabled in droplet velocity equations."""
+        return self.spray_flow().dropletDragEnabled()
+
+    @droplet_drag_enabled.setter
+    def droplet_drag_enabled(self, enabled):
+        self.spray_flow().setDropletDragEnabled(<cbool>enabled)
+
+    @property
+    def droplet_axial_drag_enabled(self):
+        """Whether axial drag is enabled in the droplet velocity equation."""
+        return self.spray_flow().dropletAxialDragEnabled()
+
+    @droplet_axial_drag_enabled.setter
+    def droplet_axial_drag_enabled(self, enabled):
+        self.spray_flow().setDropletAxialDragEnabled(<cbool>enabled)
+
+    @property
+    def droplet_axial_drag_multiplier(self):
+        """Multiplier for axial drag in the droplet velocity equation."""
+        return self.spray_flow().dropletAxialDragMultiplier()
+
+    @droplet_axial_drag_multiplier.setter
+    def droplet_axial_drag_multiplier(self, multiplier):
+        self.spray_flow().setDropletAxialDragMultiplier(multiplier)
+
+    @property
+    def droplet_spread_drag_enabled(self):
+        """Whether radial drag is enabled in the droplet spread-rate equation."""
+        return self.spray_flow().dropletSpreadDragEnabled()
+
+    @droplet_spread_drag_enabled.setter
+    def droplet_spread_drag_enabled(self, enabled):
+        self.spray_flow().setDropletSpreadDragEnabled(<cbool>enabled)
+
+    @property
+    def droplet_spread_drag_multiplier(self):
+        """Multiplier for radial drag in the droplet spread-rate equation."""
+        return self.spray_flow().dropletSpreadDragMultiplier()
+
+    @droplet_spread_drag_multiplier.setter
+    def droplet_spread_drag_multiplier(self, multiplier):
+        self.spray_flow().setDropletSpreadDragMultiplier(multiplier)
+
+    @property
     def evaporation_rate(self):
         """Volumetric droplet evaporation source [kg/m^3/s]."""
         cdef int j

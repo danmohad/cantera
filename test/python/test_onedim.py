@@ -329,6 +329,45 @@ class TestMonodisperseSpray:
         assert np.all(sim.flame.droplet_diameter > 0.0)
         assert "liquid-mass-density" in sim.flame.component_names
 
+    def test_spray_source_switches(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
+        spray = self.make_spray(droplet_velocity=0.2)
+
+        sim = ct.CounterflowDiffusionFlame(gas, width=0.02, spray=spray)
+        assert sim.flame.gas_phase_spray_sources_enabled
+        assert sim.flame.droplet_sources_enabled
+        assert sim.flame.droplet_drag_enabled
+        assert sim.flame.droplet_axial_drag_enabled
+        assert sim.flame.droplet_spread_drag_enabled
+        assert sim.flame.droplet_axial_drag_multiplier == approx(1.0)
+        assert sim.flame.droplet_spread_drag_multiplier == approx(1.0)
+
+        sim.flame.gas_phase_spray_sources_enabled = False
+        assert not sim.flame.gas_phase_spray_mass_source_enabled
+        assert not sim.flame.gas_phase_spray_species_source_enabled
+        assert not sim.flame.gas_phase_spray_energy_source_enabled
+        assert not sim.flame.gas_phase_spray_momentum_source_enabled
+
+        sim.flame.droplet_sources_enabled = False
+        assert not sim.flame.droplet_evaporation_enabled
+        assert not sim.flame.droplet_heat_transfer_enabled
+        assert not sim.flame.droplet_axial_drag_enabled
+        assert not sim.flame.droplet_spread_drag_enabled
+
+        sim.flame.droplet_axial_drag_enabled = True
+        sim.flame.droplet_axial_drag_multiplier = 0.25
+        sim.flame.droplet_spread_drag_multiplier = 0.5
+        assert sim.flame.droplet_axial_drag_enabled
+        assert not sim.flame.droplet_drag_enabled
+        assert sim.flame.droplet_axial_drag_multiplier == approx(0.25)
+        assert sim.flame.droplet_spread_drag_multiplier == approx(0.5)
+
+        with pytest.raises(ct.CanteraError, match="non-negative"):
+            sim.flame.droplet_axial_drag_multiplier = -1.0
+        with pytest.raises(ct.CanteraError, match="non-negative"):
+            sim.flame.droplet_spread_drag_multiplier = -1.0
+
     def test_droplet_reversal_raises(self):
         gas = ct.Solution("h2o2.yaml")
         gas.TPX = 900.0, ct.one_atm, "H2:1e-12, O2:0.21, N2:0.79"
