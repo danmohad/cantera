@@ -85,8 +85,9 @@ The checks are conservative:
 - set symmetric air inlet boundary conditions
 - call `solve(auto=True)` with no validation-only staging helpers
 
-The case is a fully coupled nonreacting methane spray in air with droplet drag,
-gas mass/species/momentum feedback, the gas energy equation, and spray energy
+The case is a fully coupled nonreacting methane spray in air at a `1e-3`
+liquid-to-gas mass-density loading with droplet drag, gas
+mass/species/momentum feedback, the gas energy equation, and spray energy
 feedback enabled. The checks verify that the stagnation plane remains centered,
 the droplets dry out before the stagnation plane, the dryout layer is resolved
 on a dynamically refined grid, methane vapor and gas cooling are produced, and

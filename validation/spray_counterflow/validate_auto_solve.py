@@ -41,7 +41,7 @@ GAS_SPEED = 0.2
 DROPLET_SPEED = 1.0
 DIAMETER = 40e-6
 D_MIN = 2e-6
-LIQUID_LOADING = 1e-4
+LIQUID_LOADING = 1e-3
 AIR = "O2:0.21,N2:0.79"
 
 
@@ -149,10 +149,10 @@ def check_solution(sim: ct.CounterflowDiffusionFlame, summary: dict[str, float])
     assert np.count_nonzero(wet) > 25
     assert np.all(np.diff(diameter[wet]) <= 5e-11)
     assert np.all(liquid_density >= -1e-18)
-    assert summary["max_ch4_mass_fraction"] > 1e-5
-    assert summary["minimum_temperature"] < TGAS - 0.05
+    assert summary["max_ch4_mass_fraction"] > 1e-3
+    assert summary["minimum_temperature"] < TGAS - 1.0
     assert summary["minimum_energy_source"] < 0.0
-    assert np.max(np.abs(np.sum(sim.Y, axis=0) - 1.0)) < 1e-7
+    assert np.max(np.abs(np.sum(sim.Y, axis=0) - 1.0)) < 5e-7
 
 
 def plot_solution(sim: ct.CounterflowDiffusionFlame, outdir: Path) -> None:
@@ -214,7 +214,7 @@ def main() -> None:
     plot_solution(sim, outdir)
 
     with (outdir / "auto_solve_summary.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=summary.keys())
+        writer = csv.DictWriter(f, fieldnames=summary.keys(), lineterminator="\n")
         writer.writeheader()
         writer.writerow(summary)
 

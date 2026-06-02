@@ -1443,7 +1443,7 @@ class CounterflowDiffusionFlame(FlameBase):
         self.set_initial_guess(mode="linear")
 
         if self._using_default_refine_criteria():
-            self.set_refine_criteria(ratio=4.0, slope=0.08, curve=0.12, prune=0.0)
+            self.set_refine_criteria(ratio=5.0, slope=0.16, curve=0.24, prune=0.0)
 
         final_energy = self.energy_enabled
         final_mass = self.flame.gas_phase_spray_mass_source_enabled
@@ -1457,6 +1457,7 @@ class CounterflowDiffusionFlame(FlameBase):
         self.flame.gas_phase_spray_sources_enabled = False
         self.flame.droplet_axial_drag_enabled = False
         self.flame.droplet_spread_drag_enabled = False
+        self._set_spray_profiles(self._integrate_spray_initial_guess(False))
         self._solve_spray_stage(loglevel, refine_grid, "solving one-way spray without drag")
 
         if final_axial_drag:
