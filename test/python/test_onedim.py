@@ -412,6 +412,34 @@ class TestMonodisperseSpray:
         assert max(abs(sim.flame.droplet_velocity)) > 0.0
         assert max(abs(sim.flame.droplet_spread_rate)) > 0.0
 
+    def test_counterflow_spray_auto_air_air(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "O2:0.21, N2:0.79"
+        spray = self.make_spray(
+            diameter=100e-6,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            liquid_mass_density=1e-10,
+            droplet_velocity=0.2,
+            minimum_droplet_diameter=1e-6,
+        )
+
+        sim = ct.CounterflowDiffusionFlame(gas, width=0.02, spray=spray)
+        for inlet in (sim.fuel_inlet, sim.oxidizer_inlet):
+            inlet.T = 300.0
+            inlet.X = "O2:0.21, N2:0.79"
+            inlet.mdot = 0.05
+        sim.energy_enabled = False
+        sim.solve(loglevel=0, refine_grid=False, auto=True)
+
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert max(sim.Y[gas.species_index("H2")]) > 0.0
+        assert sim.flame.gas_phase_spray_sources_enabled
+        assert sim.flame.droplet_drag_enabled
+
 def check_component_order(fname: str, group: str):
     with fname.open("r", encoding="utf-8") as fid:
         reader = yaml.YAML(typ="safe")

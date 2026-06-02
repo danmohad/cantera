@@ -78,9 +78,22 @@ The checks are conservative:
 - enabling spray energy feedback gives a negative gas energy source and a
   resolved gas-temperature depression in the wet source region
 
+`validate_auto_solve.py` validates the intended user-facing workflow:
+
+- construct `ct.MonodisperseSpray`
+- construct `ct.CounterflowDiffusionFlame(..., spray=spray)`
+- set symmetric air inlet boundary conditions
+- call `solve(auto=True)` with no validation-only staging helpers
+
+The case is a fully coupled nonreacting methane spray in air with droplet drag,
+gas mass/species/momentum feedback, the gas energy equation, and spray energy
+feedback enabled. The checks verify that the stagnation plane remains centered,
+the droplets dry out before the stagnation plane, the dryout layer is resolved
+on a dynamically refined grid, methane vapor and gas cooling are produced, and
+species remain normalized.
+
 ## Not yet validated
 
-Reacting energy-coupled gaseous flames and the final user-facing automatic
-staging are still open. The current drag and feedback validations use explicit
-staged initial guesses; that is a validation harness, not yet the intended
-Python-only workflow.
+Reacting spray flames are still open. The current validation covers nonreacting
+evaporation, drag, gas feedback, nonreacting energy feedback, and the direct
+Python automatic-solve workflow.
