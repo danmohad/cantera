@@ -230,4 +230,4 @@ Gate 6 status:
 - `README.md` and `spray_flamelets_pr.md` describe the validated scope
 - focused unit tests, the full spray validation battery, and the broader
   upstream `scons test -j8` suite pass locally
-- remaining: split the work into logical commits and push the feature branch
+- logical commits have been created and pushed to `fork/spray-flamelets`
