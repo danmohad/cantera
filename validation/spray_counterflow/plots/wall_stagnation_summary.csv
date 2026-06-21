@@ -1,0 +1,2 @@
+points,wet_points,dryout_mm,inlet_diameter_um,minimum_diameter_um,max_ch4_mass_fraction,minimum_temperature,minimum_energy_source,gas_continuity_rel,liquid_continuity_rel,droplet_mass_abs,droplet_mass_rel,species_sum_error
+41,21,1.25,25.000000000000014,2.0000000000000013,0.0003928960568399292,299.67424087841835,-166549.9775924704,1.7108237138658475e-05,0.0007180756425216639,1.96008395159875e-13,0.00035939943197541523,6.661338147750939e-15
