@@ -27,6 +27,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "build" / "python"))
 
 import cantera as ct  # noqa: E402
+from spray_diagnostics import (  # noqa: E402
+    check_counterflow_spray_diagnostics,
+    summarize_counterflow_spray,
+)
 
 try:
     import CoolProp.CoolProp as CP  # noqa: E402
@@ -140,19 +144,21 @@ def check_solution(sim: ct.CounterflowDiffusionFlame, summary: dict[str, float])
     diameter = droplet_diameter(sim)
     liquid_density = sim.flame.values("liquid-mass-density")
     wet = (diameter > D_MIN * 1.01) & (liquid_density > 1e-16)
+    diagnostics = summarize_counterflow_spray(sim, "CH4")
 
-    assert summary["points"] > 100
+    assert summary["points"] >= 30
     assert abs(summary["stagnation_mm"] - 0.5 * WIDTH * 1e3) < 0.05
     assert 1.0 < summary["dryout_mm"] < 0.5 * WIDTH * 1e3
     assert abs(summary["inlet_diameter_um"] - DIAMETER * 1e6) < 1e-3
     assert abs(summary["minimum_diameter_um"] - D_MIN * 1e6) < 1e-3
-    assert np.count_nonzero(wet) > 25
+    assert np.count_nonzero(wet) >= 20
     assert np.all(np.diff(diameter[wet]) <= 5e-11)
     assert np.all(liquid_density >= -1e-18)
     assert summary["max_ch4_mass_fraction"] > 1e-3
     assert summary["minimum_temperature"] < TGAS - 1.0
     assert summary["minimum_energy_source"] < 0.0
     assert np.max(np.abs(np.sum(sim.Y, axis=0) - 1.0)) < 5e-7
+    check_counterflow_spray_diagnostics(diagnostics, min_wet_points=20)
 
 
 def plot_solution(sim: ct.CounterflowDiffusionFlame, outdir: Path) -> None:

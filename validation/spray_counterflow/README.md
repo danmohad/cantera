@@ -1,10 +1,95 @@
 # Spray Counterflow Validation
 
-This directory records the staged validation status for the spray flamelet work.
+This directory records the staged validation status for the spray flamelet
+implementation. The current emphasis is a robust dilute counterflow spray
+workflow that a Python user can run directly with `solve(auto=True)`.
 
-## Current validated stages
+## Current Status
 
-`validate_one_way.py` validates one-way, nonreacting counterflow evaporation:
+The counterflow spray path is currently validated through:
+
+- one-way evaporation with drag disabled
+- one-way axial droplet drag
+- one-way axial plus radial/spread drag
+- gas mass, species, radial momentum, and energy feedback
+- direct user-facing automatic solve with no validation-only staging helpers
+- finite-difference gas/liquid continuity and source shutoff diagnostics
+- a nonreacting direct-solve robustness sweep with accepted left/right injection
+  cases and one named model-limit case
+- a direct gas-assisted reacting methane-air spray flame
+- a small direct reacting sweep over liquid loading, droplet diameter, strain,
+  and gaseous fuel dilution
+- direct nonreacting and reacting wall-stagnation spray cases with
+  source-balance diagnostics
+- a direct no-slip freely propagating methane-air spray-flame loading sweep
+
+The latest direct automatic nonreacting validation is `validate_auto_solve.py`.
+It sets up a symmetric air-air counterflow at 1 atm and 300 K with liquid
+methane injected from the left:
+
+- gas mechanism: `gri30.yaml`
+- width: `20 mm`
+- gas speed: `0.2 m/s` from each side
+- inlet droplet diameter: `40 um`
+- minimum droplet diameter: `2 um`
+- droplet velocity: `1.0 m/s`
+- liquid-to-gas mass-density loading: `1e-3`
+- gas mass/species/momentum/energy feedback enabled
+
+The direct workflow is:
+
+```python
+spray = ct.MonodisperseSpray(...)
+sim = ct.CounterflowDiffusionFlame(gas, width=WIDTH, spray=spray)
+sim.fuel_inlet.T = TGAS
+sim.fuel_inlet.X = AIR
+sim.fuel_inlet.mdot = rho_gas * GAS_SPEED
+sim.oxidizer_inlet.T = TGAS
+sim.oxidizer_inlet.X = AIR
+sim.oxidizer_inlet.mdot = rho_gas * GAS_SPEED
+sim.solve(auto=True)
+```
+
+Latest representative result from `plots/auto_solve_summary.csv`:
+
+- grid points: `33`
+- stagnation plane: `10.0038 mm`
+- dryout location: `4.0 mm`
+- inlet/minimum diameter: `40 um / 2 um`
+- maximum methane mass fraction: `5.00e-3`
+- minimum gas temperature: `295.62 K`
+- minimum gas energy source: `-6.99e5 W/m3`
+
+The corresponding plots are:
+
+- `plots/auto_solve_spray_profiles.png`
+- `plots/auto_solve_gas_feedback.png`
+
+## Dryout And Refinement Policy
+
+Dryout is treated as a numerical cutoff, not as a physical droplet state beyond
+the cutoff diameter. Once droplets reach `minimum_droplet_diameter`, the
+dispersed phase is absent:
+
+- droplet mass is held at the cutoff mass
+- liquid mass density is driven to zero
+- source terms are disabled for dry or empty-loading nodes
+- axial reversal checks are skipped for dry or empty-loading nodes
+- undefined intensive droplet placeholders, such as velocity, spread rate, and
+  temperature, are carried from upstream
+
+This avoids artificial discontinuities in variables that no longer represent
+physical droplets.
+
+Grid refinement is intentionally driven by wet-region physics and gas fields.
+Post-dryout liquid density and spread-rate placeholders do not drive mesh
+insertion. This prevents the solver from spending unlimited refinement effort
+on the numerical cutoff front while still resolving the evaporation, drag, gas
+cooling, and vapor-production regions.
+
+## Staged Validations
+
+`validate_one_way.py` validates one-way nonreacting evaporation:
 
 - symmetric air-air counterflow at 1 atm and 300 K
 - liquid methane droplets injected from the left
@@ -13,88 +98,342 @@ This directory records the staged validation status for the spray flamelet work.
 - droplet heat transfer and evaporation enabled
 - energy equation disabled
 
-The checks are intentionally physical:
+Current checks:
 
 - gas-only stagnation plane is at the midplane
-- droplet diameter and liquid loading decrease monotonically while droplets are wet
+- droplet diameter and liquid loading decrease monotonically while droplets are
+  wet
 - dryout moves downstream as inlet droplet diameter increases
-- the wet-region diameter follows an approximate `D^2` trend away from startup/dryout
+- long-lived droplets that remain wet through the domain retain a high-quality
+  approximate `D^2` trend away from startup effects
 
-`validate_axial_drag.py` validates one-way axial droplet drag over the same
-counterflow gas field:
+`validate_axial_drag.py` validates one-way axial drag over the same counterflow
+gas field:
 
-- the no-drag evaporation case is solved first on a refined grid
-- the one-way droplet ODEs are integrated over that gas field to initialize
-  mass, temperature, axial velocity, and liquid density together
-- axial drag is enabled, gas-phase feedback remains disabled, spread-rate drag
-  remains disabled
-- the drag-on solution is converged and then refined dynamically
+- the no-drag evaporation case is solved first
+- the droplet initial guess is generated by integrating the one-way droplet
+  equations over the gas solution
+- axial drag is enabled while gas feedback and spread drag remain disabled
 
-The checks are physical:
+Current checks:
 
 - droplets decelerate monotonically while wet
-- liquid mass flux decreases monotonically even though local liquid density can
-  initially rise from axial compression
-- droplets dry out before the stagnation plane
-- the drag-enabled refinement adds grid points around the droplet relaxation and
-  dryout layer
+- liquid mass flux decreases monotonically
+- droplets dry out before the stagnation plane for the validation case
+- refinement resolves the axial relaxation and dryout region
 
-`validate_droplet_drag.py` validates full one-way droplet drag in the strained
-counterflow equations:
+`validate_droplet_drag.py` validates full one-way droplet drag:
 
-- axial-only drag and axial-plus-spread drag cases are solved from staged
-  droplet initial guesses
-- the spread-rate equation is enabled while gas-phase feedback remains disabled
-- dynamic refinement is active for both droplet axial velocity and droplet
-  spread rate
-- droplet spread rate is positive on the injector side and remains below the
-  gas spread rate while droplets are wet
+- axial-only and axial-plus-spread cases are solved
+- gas feedback remains disabled
+- the spread-rate equation is active and stays below the gas spread rate while
+  droplets are wet
 - spread drag reduces liquid loading and liquid flux relative to axial-only drag
 
-`validate_gas_feedback.py` validates nonreacting gas feedback over the full
-droplet-drag counterflow solution:
+`validate_gas_feedback.py` validates nonreacting gas feedback:
 
-- gas continuity feedback is enabled first, with species, energy, and gas
-  momentum feedback disabled
-- species feedback is then enabled and produces a smooth methane vapor profile
-  while preserving species normalization
-- radial momentum feedback is enabled last and reduces the gas spread rate in
-  the injector-side region where the spray momentum source is negative
-- the gas energy equation is then enabled with spray energy feedback disabled,
-  followed by a final solve with spray energy feedback enabled
+- gas continuity feedback is enabled first
+- species feedback produces a smooth methane vapor profile and preserves
+  species normalization
+- radial momentum feedback changes the gas spread rate with the sign implied by
+  the spray momentum source
+- energy feedback produces a negative gas energy source and a resolved
+  temperature depression in the wet source region
 
-The checks are conservative:
+Current generated artifacts:
 
-- without gas mass feedback, the axisymmetric gas continuity residual is small
-  only when the evaporation source is omitted
-- with gas mass feedback, the same residual is small only when the evaporation
-  source is included
-- mass-only feedback leaves methane absent from the gas phase
-- species feedback gives a positive methane vapor profile
-- momentum feedback changes gas spread rate with the sign implied by the radial
-  spray momentum source
-- with energy enabled and spray energy feedback disabled, the gas remains at the
-  300 K boundary temperature
-- enabling spray energy feedback gives a negative gas energy source and a
-  resolved gas-temperature depression in the wet source region
+- `plots/one_way_*.png`, `plots/one_way_summary.csv`
+- `plots/axial_drag_*.png`, `plots/axial_drag_summary.csv`
+- `plots/droplet_drag_*.png`, `plots/droplet_drag_summary.csv`
+- `plots/gas_feedback_*.png`, `plots/gas_feedback_summary.csv`
 
-`validate_auto_solve.py` validates the intended user-facing workflow:
+`validate_conservation.py` validates physical source consistency on the direct
+nonreacting and reacting baseline cases:
 
-- construct `ct.MonodisperseSpray`
-- construct `ct.CounterflowDiffusionFlame(..., spray=spray)`
-- set symmetric air inlet boundary conditions
-- call `solve(auto=True)` with no validation-only staging helpers
+- axisymmetric gas continuity residual includes the spray mass source
+- dispersed-phase continuity residual includes evaporation and radial spreading
+- single-droplet mass residual matches the evaporation law in wet cells
+- gas species mass fractions remain normalized
+- dryout cells have zero evaporation, heat-transfer, gas-energy, and gas-momentum
+  source terms
+- spray energy feedback is cooling for cold evaporating droplets
+- radial gas momentum feedback damps droplet/gas spread-rate slip
 
-The case is a fully coupled nonreacting methane spray in air at a `1e-3`
-liquid-to-gas mass-density loading with droplet drag, gas
-mass/species/momentum feedback, the gas energy equation, and spray energy
-feedback enabled. The checks verify that the stagnation plane remains centered,
-the droplets dry out before the stagnation plane, the dryout layer is resolved
-on a dynamically refined grid, methane vapor and gas cooling are produced, and
-species remain normalized.
+Current representative diagnostics:
 
-## Not yet validated
+- nonreacting direct case: gas continuity relative residual `3.39e-7`, liquid
+  continuity relative residual `6.47e-5`, droplet-mass residual `5.86e-15`
+  absolute / `1.44e-5` relative, species sum error `1.03e-13`
+- reacting direct case: gas continuity relative residual `3.29e-5`, liquid
+  continuity relative residual `5.38e-3`, droplet-mass residual `8.53e-13`
+  absolute near the cutoff front, species sum error `1.80e-11`
 
-Reacting spray flames are still open. The current validation covers nonreacting
-evaporation, drag, gas feedback, nonreacting energy feedback, and the direct
-Python automatic-solve workflow.
+The largest liquid and droplet-mass relative residuals occur at the final wet
+cell adjacent to the dryout cutoff, where diameter clamping and source limiting
+intentionally replace a smooth continuum droplet field. Absolute droplet-mass
+errors remain at roundoff-scale levels in those cells, and bulk wet-region
+residuals are much smaller.
+
+`validate_nonreacting_sweep.py` characterizes the direct nonreacting
+`solve(auto=True)` envelope. Accepted cases currently include:
+
+- liquid density ratios `1e-4`, `1e-3`, and `3e-3`
+- droplet diameters `25 um` and `40 um`
+- droplet injection speeds `0.4`, `1.0`, and `1.6 m/s`
+- gas speeds `0.1`, `0.2`, and `0.3 m/s`
+- left-side and right-side spray injection for symmetric air-air cases
+- energy enabled and fixed-temperature energy-off solves
+
+All accepted cases satisfy the conservation diagnostics. Current expected
+model-limit cases are also recorded in `plots/nonreacting_sweep_summary.csv`:
+
+- `60 um` droplets: droplet reversal before dryout
+
+## Verification Commands
+
+Run from the Cantera repository root with the local build on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=build/python ../.venv-cantera/bin/python -m pytest -q \
+    test/python/test_onedim.py::TestMonodisperseSpray
+
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_one_way.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_axial_drag.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_droplet_drag.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_gas_feedback.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_auto_solve.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_conservation.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_nonreacting_sweep.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_wall_stagnation.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_reacting_wall_stagnation.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_reacting_auto_solve.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_reacting_sweep.py
+PYTHONPATH=build/python ../.venv-cantera/bin/python \
+    validation/spray_counterflow/validate_free_flame.py
+```
+
+Latest focused test result:
+
+- `test/python/test_onedim.py::TestMonodisperseSpray`: `13 passed`
+- Full validation battery listed above: passed locally in `2740.9 s`
+- Upstream `scons test -j8`: passed locally when embedded-Python tests are run
+  with `PYTHONPATH=build/python:<venv site-packages>:test/python`
+- `validate_auto_solve.py`: passed with the 33-point result summarized above
+- `validate_conservation.py`: passed for direct nonreacting and reacting
+  baseline cases
+- `validate_nonreacting_sweep.py`: passed with 10 accepted cases and 1 named
+  expected model-limit case
+- `validate_wall_stagnation.py`: passed with 41 grid points, 21 wet cells,
+  dryout at `1.25 mm`, and gas/liquid/droplet residual diagnostics
+- `validate_reacting_wall_stagnation.py`: passed with 3 accepted lit
+  wall-stagnation spray-flame cases
+- `validate_reacting_auto_solve.py`: passed with the 224-point result summarized
+  below
+- `validate_reacting_sweep.py`: passed with 8 accepted direct-interface reacting
+  cases and no expected gaps
+- `validate_free_flame.py`: passed with 3 accepted no-slip freely propagating
+  methane-air spray-flame cases
+
+## Wall-Stagnation Status
+
+`validate_wall_stagnation.py` is the current direct-workflow nonreacting wall
+case. It solves an air jet impinging on an isothermal wall with a dilute liquid
+methane spray injected from the inlet. The script uses only:
+
+```python
+spray = ct.MonodisperseSpray(...)
+sim = ct.ImpingingJet(gas, width=WIDTH, spray=spray)
+sim.inlet.T = TGAS
+sim.inlet.X = AIR
+sim.inlet.mdot = rho_gas * GAS_SPEED
+sim.surface.T = TGAS
+sim.solve(auto=True)
+```
+
+Latest representative result from `plots/wall_stagnation_summary.csv`:
+
+- grid points: `41`
+- wet droplet cells: `21`
+- dryout location: `1.25 mm`
+- inlet/minimum diameter: `25 um / 2 um`
+- maximum methane mass fraction: `3.93e-4`
+- minimum gas temperature: `299.67 K`
+- gas/liquid continuity relative residuals: `1.71e-5 / 7.18e-4`
+
+The corresponding plot is `plots/wall_stagnation_profiles.png`.
+
+`validate_reacting_wall_stagnation.py` validates the reacting wall-stagnation
+workflow. It solves premixed methane-air impinging on a `500 K` wall with a
+dilute liquid methane spray, again through the direct public interface:
+
+```python
+spray = ct.MonodisperseSpray(...)
+sim = ct.ImpingingJet(gas, width=WIDTH, spray=spray)
+sim.inlet.T = TIN
+sim.inlet.Y = inlet_y
+sim.inlet.mdot = INLET_MDOT
+sim.surface.T = TSURF
+sim.solve(auto=True)
+```
+
+Latest accepted reacting wall envelope from `plots/reacting_wall_summary.csv`:
+
+- premixed methane-air, `phi = 0.8`, inlet `300 K`, wall `500 K`
+- inlet mass flux `0.04 kg/m2/s`, width `20 mm`
+- liquid methane droplets, `80 um` inlet diameter, `2 um` cutoff diameter
+- liquid-to-gas density loadings `1e-7`, `1e-6`, and `1e-5`
+- maximum temperatures `1541.6-1542.1 K`
+- flame location `4.5 mm`, dryout location `1.44 mm`
+- `126-130` grid points and `68-71` wet droplet cells
+- maximum evaporation and gas cooling scale monotonically with loading
+
+The corresponding plots are:
+
+- `plots/reacting_wall_profiles.png`
+- `plots/reacting_wall_sources.png`
+
+## Reacting Status
+
+`validate_reacting_auto_solve.py` is the current direct-workflow reacting case:
+a methane-air counterflow diffusion flame with a small liquid methane spray
+injected from the fuel side. This is deliberately a dilute, gas-assisted spray
+case. The formulation is not intended to model a pure liquid-fuel counterflow
+flame with no gaseous fuel coflow.
+
+The script uses only the user-facing Python interface:
+
+```python
+spray = ct.MonodisperseSpray(...)
+sim = ct.CounterflowDiffusionFlame(gas, width=WIDTH, spray=spray)
+sim.fuel_inlet.T = TFUEL
+sim.fuel_inlet.X = "CH4:1"
+sim.fuel_inlet.mdot = FUEL_MDOT
+sim.oxidizer_inlet.T = TOX
+sim.oxidizer_inlet.X = "O2:0.21,N2:0.79"
+sim.oxidizer_inlet.mdot = OX_MDOT
+sim.solve(auto=True)
+```
+
+Latest representative result from `plots/reacting_auto_summary.csv`:
+
+- grid points: `224`
+- maximum temperature: `2047.09 K`
+- minimum temperature: `299.77 K`
+- flame location: `9.97 mm`
+- dryout location: `3.71 mm`
+- maximum heat release rate: `2.58e8 W/m3`
+- maximum methane mass fraction: `1.0`
+- minimum droplet diameter: `2.0 um`
+- species sum error: `1.8e-11`
+
+The corresponding plots are:
+
+- `plots/reacting_auto_spray_profiles.png`
+- `plots/reacting_auto_gas_flame.png`
+
+## Reacting Sweep
+
+`validate_reacting_sweep.py` exercises the same direct Python workflow over a
+small dilute gas-assisted envelope. It varies one condition at a time around
+the baseline and requires every case to converge through `solve(auto=True)` with
+a lit flame, resolved wet droplet region, dryout upstream of the flame, bounded
+minimum diameter, finite heat release, and normalized gas species.
+
+Current accepted cases from `plots/reacting_sweep_summary.csv`:
+
+- baseline: `20 um`, liquid density ratio `1e-4`
+- higher loadings: liquid density ratios `1e-3` and `3e-3`
+- droplet size variation: `15 um` and `30 um`
+- strain variation: fuel/oxidizer mdot pairs `0.12/0.24` and
+  `0.08/0.16`, and `0.16/0.32 kg/m2/s`
+- gaseous fuel dilution: `CH4:0.8,N2:0.2`
+
+Representative envelope metrics:
+
+- accepted cases pass with `127-235` grid points
+- maximum temperatures are `2022-2061 K`
+- flame locations are `9.60-10.39 mm`
+- dryout locations are `0.91-4.20 mm`
+- maximum liquid-to-gaseous-fuel mass-flux ratio is `3.26e-3`
+- maximum species sum error is `1.52e-9`
+
+The pure-CH4 coflow cases dry out in or near the methane-air mixing/preheat
+region, while the fuel-diluted case dries much earlier because the carrier gas
+is no longer methane-saturated at the inlet. The corresponding plots are:
+
+- `plots/reacting_sweep_profiles.png`
+- `plots/reacting_sweep_metrics.png`
+
+## Free-Flame Status
+
+`validate_free_flame.py` validates the freely propagating flame branch under the
+no-slip spray assumption. It solves premixed methane-air flames with dilute
+liquid methane using only:
+
+```python
+spray = ct.MonodisperseSpray(...)
+sim = ct.FreeFlame(gas, width=WIDTH, spray=spray)
+sim.solve(auto=True)
+```
+
+This branch constrains droplet axial velocity to the gas velocity. It verifies
+mass/species/energy feedback and droplet dryout, but it does not claim
+independent axial two-way momentum coupling because Cantera's free-flame model
+does not solve a gas axial momentum equation.
+
+Current accepted cases from `plots/free_flame_summary.csv`:
+
+- premixed methane-air, `phi = 0.9`, `300 K`, `1 atm`
+- liquid methane droplets, `500 um` inlet diameter, `2 um` cutoff diameter
+- liquid-to-gas density loadings `1e-6`, `1e-5`, and `1e-4`
+- 77 grid points and 10 wet droplet cells
+- dryout at `10.12 mm`, upstream of the `24.0 mm` temperature peak
+- no-slip velocity error below `6e-15 m/s`
+- maximum evaporation and gas cooling scale monotonically with loading
+
+The corresponding plots are:
+
+- `plots/free_flame_profiles.png`
+- `plots/free_flame_sources.png`
+
+## Validated Scope And Follow-Up Work
+
+The current validated target is robust dilute spray flamelets with direct Python
+setup and `solve(auto=True)` for counterflow, wall-stagnation, and no-slip free
+flames. Within that scope, the implementation has full gas mass, species,
+radial momentum, and gas energy feedback in strained configurations, with
+droplet evaporation, heat transfer, axial drag, spread-rate drag, dryout
+handling, and reversal guarding active.
+
+Current scope boundaries:
+
+- this is a dilute Eulerian-Eulerian monodisperse model, not a dense-spray or
+  pure-liquid-fuel-flame model
+- the documented nonreacting counterflow model-limit case is `60 um` droplets,
+  which reach droplet reversal before dryout for the selected symmetric flow
+- the reacting counterflow validation is gas-assisted methane-air combustion
+  over the accepted dilute envelope described above
+- free flames use no-slip droplet motion and do not claim independent axial
+  two-way momentum coupling
+
+Follow-up work after the current PR scope:
+
+- widen the nonreacting envelope beyond the present sweep if larger droplets or
+  lower-speed cases are needed
+- widen the reacting counterflow envelope with droplet velocity variation,
+  oxidizer preheat, and cases where droplets dry closer to the flame
+- widen wall-stagnation validation with more strain, wall temperature, and
+  liquid loading variation
+- decide how much of the long-running validation suite should become automated
+  CI versus documented offline validation artifacts
