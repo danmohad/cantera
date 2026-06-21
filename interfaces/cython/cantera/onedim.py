@@ -843,7 +843,12 @@ class FreeFlame(FlameBase):
                 self.spray = spray
                 spray.apply(self.flame)
                 self.spray.set_initial_guess(self.flame)
-                return super().solve(loglevel, refine_grid, auto=False)
+                # The zero-loading flame has already used the requested
+                # automatic grid refinement. Introducing finite no-slip spray
+                # on that grid avoids unbounded refinement at the numerical
+                # dryout cutoff while still solving the coupled spray/gas
+                # equations from the refined gas-flame state.
+                return super().solve(loglevel, False, auto=False)
 
             self.spray.set_initial_guess(self.flame)
 
@@ -1059,7 +1064,286 @@ class BurnerFlame(FlameBase):
         self.set_steady_callback(original_callback)
 
 
-class CounterflowDiffusionFlame(FlameBase):
+class _SprayAutoSolveMixin:
+    @staticmethod
+    def _spray_film_correction(transfer_number):
+        if abs(transfer_number) < 1e-8:
+            return 1.0
+        limited = max(transfer_number, -0.95)
+        return (1.0 + limited)**0.7 * np.log1p(limited) / limited
+
+    def _spray_rates(self, mass, temperature, droplet_velocity, gas_velocity,
+                     droplet_spread_rate, gas_spread_rate, gas_temperature, gas_y):
+        spray = self.spray
+        gas = self.gas
+        fuel_index = gas.species_index(spray.fuel_species)
+        rho_l = spray.liquid_density
+        diameter = (6.0 * mass / (np.pi * rho_l)) ** (1.0 / 3.0)
+        radius = 0.5 * diameter
+
+        y = np.maximum(gas_y, 0.0)
+        ysum = np.sum(y)
+        if ysum > 0.0:
+            y = y / ysum
+        gas.TPY = max(gas_temperature, 1.0), self.P, y
+
+        density = gas.density
+        viscosity = gas.viscosity
+        conductivity = gas.thermal_conductivity
+        cp_gas = gas.cp_mass
+        fuel_diff = max(gas.mix_diff_coeffs[fuel_index], 1e-300)
+
+        axial_slip = gas_velocity - droplet_velocity
+        radial_slip_scale = radius * (gas_spread_rate - droplet_spread_rate)
+        slip = np.sqrt(axial_slip**2 + radial_slip_scale**2)
+        reynolds = density * slip * diameter / max(viscosity, 1e-300)
+        prandtl = cp_gas * viscosity / max(conductivity, 1e-300)
+        schmidt = viscosity / max(density * fuel_diff, 1e-300)
+        nu0 = 2.0 + 0.552 * np.sqrt(reynolds) * prandtl ** (1.0 / 3.0)
+        sh0 = 2.0 + 0.552 * np.sqrt(reynolds) * schmidt ** (1.0 / 3.0)
+
+        w_fuel = gas.molecular_weights[fuel_index]
+        rv = gas_constant / w_fuel
+        droplet_temperature = min(max(temperature, 1.0), spray.boiling_temperature)
+        exponent = -spray.latent_heat / rv * (
+            1.0 / droplet_temperature - 1.0 / spray.boiling_temperature
+        )
+        psat = spray.saturation_pressure * np.exp(np.clip(exponent, -700.0, 700.0))
+        psat = min(max(psat, 0.0), 0.999 * self.P)
+        x_surface = psat / self.P
+        x = gas.X
+        weights = gas.molecular_weights
+        x_carrier = sum(x[k] for k in range(gas.n_species) if k != fuel_index)
+        carrier_weight = sum(
+            x[k] * weights[k] for k in range(gas.n_species) if k != fuel_index
+        )
+        if x_carrier > 1e-300:
+            carrier_weight /= x_carrier
+        else:
+            carrier_weight = gas.mean_molecular_weight
+        y_surface = x_surface * w_fuel / max(
+            x_surface * w_fuel + (1.0 - x_surface) * carrier_weight, 1e-300
+        )
+        b_mass = max((y_surface - gas.Y[fuel_index]) / max(1.0 - y_surface, 1e-300),
+                     0.0)
+        sherwood = 2.0 + (sh0 - 2.0) / self._spray_film_correction(b_mass)
+        evaporation = 0.0
+        if b_mass > 0.0:
+            evaporation = (
+                np.pi * diameter * density * fuel_diff * sherwood * np.log1p(b_mass)
+            )
+
+        cp_fuel = gas.partial_molar_cp[fuel_index] / w_fuel
+        b_heat = cp_fuel * (gas_temperature - droplet_temperature) / max(
+            spray.latent_heat, 1e-300)
+        nusselt = 2.0 + (nu0 - 2.0) / self._spray_film_correction(b_heat)
+        if abs(b_heat) > 1e-8:
+            heat_correction = np.log1p(max(b_heat, -0.95)) / b_heat
+        else:
+            heat_correction = 1.0
+        heat = (
+            2.0 * np.pi * radius * conductivity * nusselt
+            * (gas_temperature - droplet_temperature) * heat_correction
+        )
+        drag = 3.0 * np.pi * viscosity * diameter * axial_slip
+        spread_drag = 3.0 * np.pi * viscosity * diameter * (
+            gas_spread_rate - droplet_spread_rate)
+        return evaporation, heat, drag, spread_drag
+
+    def _integrate_spray_initial_guess(self, include_axial_drag, include_spread_drag,
+                                      spread_drag_multiplier=1.0):
+        spray = self.spray
+        gas = self.gas
+        z = self.grid
+        n_points = len(z)
+        direction = 1 if self.flame.spray_inlet == "left" else -1
+        start = 0 if direction == 1 else n_points - 1
+        stop = n_points if direction == 1 else -1
+        indices = range(start + direction, stop, direction)
+
+        rho_l = spray.liquid_density
+        mass0 = np.pi / 6.0 * rho_l * spray.diameter**3
+        min_mass = np.pi / 6.0 * rho_l * spray.minimum_droplet_diameter**3
+        empty_dry_mass = max(min_mass * (1.0 + 1e-8), 1e-4 * mass0)
+        if spray.droplet_velocity is None:
+            inlet_speed = max(abs(self.velocity[start]), 1e-6)
+        else:
+            inlet_speed = abs(spray.droplet_velocity)
+        velocity_floor = direction * 1e-6
+
+        mass = np.empty(n_points)
+        droplet_velocity = np.empty(n_points)
+        droplet_temperature = np.empty(n_points)
+        liquid_density = np.empty(n_points)
+        droplet_spread_rate = np.zeros(n_points)
+
+        mass[start] = mass0
+        droplet_velocity[start] = direction * inlet_speed
+        droplet_temperature[start] = spray.liquid_temperature
+        if spray.liquid_mass_density is None:
+            liquid_density[start] = spray.liquid_mass_flux / inlet_speed
+        else:
+            liquid_density[start] = spray.liquid_mass_density
+        droplet_spread_rate[start] = spray.droplet_spread_rate
+
+        dry = False
+        max_step = 1e-6
+        for j in indices:
+            jup = j - direction
+            dz_total = z[j] - z[jup]
+            steps = max(1, int(np.ceil(abs(dz_total) / max_step)))
+            h = dz_total / steps
+            m = mass[jup]
+            ud = droplet_velocity[jup]
+            td = droplet_temperature[jup]
+            rho = liquid_density[jup]
+            vd = droplet_spread_rate[jup]
+            upstream_mass = mass[jup]
+
+            for step in range(steps):
+                if dry or m <= min_mass * (1.0 + 1e-8) or (
+                    rho <= 0.0 and m <= empty_dry_mass
+                ):
+                    dry = True
+                    m = min_mass
+                    rho = 0.0
+                    break
+
+                frac = (step + 0.5) / steps
+                gas_velocity = self.velocity[jup] + frac * (
+                    self.velocity[j] - self.velocity[jup])
+                gas_spread_rate = self.spread_rate[jup] + frac * (
+                    self.spread_rate[j] - self.spread_rate[jup])
+                gas_temperature = self.T[jup] + frac * (self.T[j] - self.T[jup])
+                gas_y = self.Y[:, jup] + frac * (self.Y[:, j] - self.Y[:, jup])
+                evaporation, heat, drag, spread_drag = self._spray_rates(
+                    m, min(td, spray.boiling_temperature), ud, gas_velocity,
+                    vd, gas_spread_rate, gas_temperature, gas_y)
+                if min_mass > 0.0 and evaporation > 0.0 and ud != 0.0:
+                    available_mass = max(upstream_mass - min_mass, 0.0)
+                    max_evaporation = (
+                        available_mass * abs(ud) / max(abs(dz_total), 1e-300)
+                    )
+                    if evaporation > max_evaporation:
+                        limited = evaporation * max_evaporation / (
+                            evaporation + max_evaporation)
+                        scale = limited / evaporation
+                        evaporation = limited
+                        heat *= scale
+                        drag *= scale
+                        spread_drag *= scale
+
+                inv_ud = 1.0 / ud
+                dm_dz = -evaporation * inv_ud
+                if include_axial_drag:
+                    du_dz = drag / max(m, 1e-300) * inv_ud
+                else:
+                    du_dz = 0.0
+                if td >= spray.boiling_temperature:
+                    td = spray.boiling_temperature
+                    dt_dz = 0.0
+                else:
+                    dt_dz = (heat - evaporation * spray.latent_heat) / (
+                        max(m, 1e-300) * spray.liquid_cp) * inv_ud
+                vd_next = vd
+                if include_spread_drag:
+                    diameter = (6.0 * m / (np.pi * rho_l)) ** (1.0 / 3.0)
+                    relaxation_rate = (
+                        spread_drag_multiplier * 3.0 * np.pi * gas.viscosity
+                        * diameter / max(m, 1e-300)
+                    )
+                    spread_step = h * inv_ud
+                    if spread_step > 0.0 and np.isfinite(spread_step):
+                        b = 1.0 + spread_step * relaxation_rate
+                        c = vd + spread_step * relaxation_rate * gas_spread_rate
+                        disc = b * b + 4.0 * spread_step * c
+                        if c > 0.0 and disc >= 0.0 and np.isfinite(disc):
+                            vd_next = 2.0 * c / (b + np.sqrt(disc))
+                        else:
+                            vd_next = 0.0
+                        dspread_dz = (vd_next - vd) / h
+                    else:
+                        dspread_dz = (
+                            spread_drag_multiplier * spread_drag / max(m, 1e-300)
+                            - vd * vd
+                        ) * inv_ud
+                        vd_next = vd + h * dspread_dz
+                    if not np.isfinite(vd_next):
+                        vd_next = 0.0
+                        dspread_dz = -vd / h
+                else:
+                    dspread_dz = 0.0
+                if rho <= 0.0:
+                    drho_dz = 0.0
+                else:
+                    mass_for_density = max(m, empty_dry_mass, 1e-300)
+                    vd_density = 0.5 * (vd + vd_next)
+                    drho_dz = (
+                        rho / mass_for_density * dm_dz
+                        - 2.0 * rho * vd_density * inv_ud
+                        - rho * du_dz * inv_ud
+                    )
+                    if not np.isfinite(drho_dz):
+                        drho_dz = 0.0
+
+                m = max(m + h * dm_dz, min_mass)
+                ud += h * du_dz
+                if direction == 1:
+                    ud = max(ud, velocity_floor)
+                else:
+                    ud = min(ud, velocity_floor)
+                td = min(max(td + h * dt_dz, 1.0), spray.boiling_temperature)
+                vd = vd_next if include_spread_drag else vd + h * dspread_dz
+                rho = min(max(rho + h * drho_dz, 0.0), 1e20)
+
+            mass[j] = m
+            droplet_velocity[j] = ud
+            droplet_temperature[j] = td
+            liquid_density[j] = rho
+            droplet_spread_rate[j] = vd
+
+        return {
+            "droplet-mass": mass,
+            "droplet-velocity": droplet_velocity,
+            "droplet-temperature": droplet_temperature,
+            "liquid-mass-density": liquid_density,
+            "droplet-spread-rate": droplet_spread_rate,
+        }
+
+    def _set_spray_profiles(self, profiles):
+        zrel = (self.grid - self.grid[0]) / (self.grid[-1] - self.grid[0])
+        for name, values in profiles.items():
+            self.flame.set_profile(name, zrel, values)
+
+    @staticmethod
+    def _spray_multiplier_ramp(final_multiplier, *, gentle=False):
+        if final_multiplier <= 0.0:
+            return [final_multiplier]
+        if gentle:
+            scales = (
+                1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3,
+                1e-2, 2e-2, 5e-2, 0.1, 0.2, 0.4, 0.7, 1.0,
+            )
+        else:
+            scales = (0.05, 0.1, 0.2, 0.4, 0.7, 1.0)
+        return [scale * final_multiplier for scale in scales]
+
+    def _solve_spray_stage(self, loglevel, refine_grid, description):
+        if loglevel:
+            print(f"\n{' ' + description + ' ':*^78s}")
+        super().solve(loglevel, refine_grid)
+
+    def _using_default_refine_criteria(self):
+        criteria = self.get_refine_criteria()
+        return (
+            np.isclose(criteria["ratio"], 10.0)
+            and np.isclose(criteria["slope"], 0.8)
+            and np.isclose(criteria["curve"], 0.8)
+            and np.isclose(criteria["prune"], -0.001)
+        )
+
+
+class CounterflowDiffusionFlame(_SprayAutoSolveMixin, FlameBase):
     """ A counterflow diffusion flame """
     __slots__ = ('fuel_inlet', 'flame', 'oxidizer_inlet', 'spray')
 
@@ -1224,279 +1508,211 @@ class CounterflowDiffusionFlame(FlameBase):
     def extinct(self):
         return max(self.T) - max(self.fuel_inlet.T, self.oxidizer_inlet.T) < 10
 
-    @staticmethod
-    def _spray_film_correction(transfer_number):
-        if abs(transfer_number) < 1e-8:
-            return 1.0
-        limited = max(transfer_number, -0.95)
-        return (1.0 + limited)**0.7 * np.log1p(limited) / limited
+    def _spray_initial_guess_mode(self):
+        try:
+            afr = self.gas.stoich_air_fuel_ratio(
+                self.fuel_inlet.Y, self.oxidizer_inlet.Y, "mass")
+            zst = 1.0 / (1.0 + afr)
+        except CanteraError:
+            return "linear"
+        if np.isfinite(zst) and 0.0 < zst < 1.0:
+            return "stoich"
+        return "linear"
 
-    def _spray_rates(self, mass, temperature, droplet_velocity, gas_velocity,
-                     droplet_spread_rate, gas_spread_rate, gas_temperature, gas_y):
-        spray = self.spray
-        gas = self.gas
-        fuel_index = gas.species_index(spray.fuel_species)
-        rho_l = spray.liquid_density
-        diameter = (6.0 * mass / (np.pi * rho_l)) ** (1.0 / 3.0)
-        radius = 0.5 * diameter
-
-        y = np.maximum(gas_y, 0.0)
-        ysum = np.sum(y)
-        if ysum > 0.0:
-            y = y / ysum
-        gas.TPY = max(gas_temperature, 1.0), self.P, y
-
-        density = gas.density
-        viscosity = gas.viscosity
-        conductivity = gas.thermal_conductivity
-        cp_gas = gas.cp_mass
-        fuel_diff = max(gas.mix_diff_coeffs[fuel_index], 1e-300)
-
-        axial_slip = gas_velocity - droplet_velocity
-        radial_slip_scale = radius * (gas_spread_rate - droplet_spread_rate)
-        slip = np.sqrt(axial_slip**2 + radial_slip_scale**2)
-        reynolds = density * slip * diameter / max(viscosity, 1e-300)
-        prandtl = cp_gas * viscosity / max(conductivity, 1e-300)
-        schmidt = viscosity / max(density * fuel_diff, 1e-300)
-        nu0 = 2.0 + 0.552 * np.sqrt(reynolds) * prandtl ** (1.0 / 3.0)
-        sh0 = 2.0 + 0.552 * np.sqrt(reynolds) * schmidt ** (1.0 / 3.0)
-
-        w_fuel = gas.molecular_weights[fuel_index]
-        rv = gas_constant / w_fuel
-        droplet_temperature = min(max(temperature, 1.0), spray.boiling_temperature)
-        exponent = -spray.latent_heat / rv * (
-            1.0 / droplet_temperature - 1.0 / spray.boiling_temperature
-        )
-        psat = spray.saturation_pressure * np.exp(np.clip(exponent, -700.0, 700.0))
-        psat = min(max(psat, 0.0), 0.999 * self.P)
-        x_surface = psat / self.P
-        x = gas.X
-        weights = gas.molecular_weights
-        x_carrier = sum(x[k] for k in range(gas.n_species) if k != fuel_index)
-        carrier_weight = sum(
-            x[k] * weights[k] for k in range(gas.n_species) if k != fuel_index
-        )
-        if x_carrier > 1e-300:
-            carrier_weight /= x_carrier
-        else:
-            carrier_weight = gas.mean_molecular_weight
-        y_surface = x_surface * w_fuel / max(
-            x_surface * w_fuel + (1.0 - x_surface) * carrier_weight, 1e-300
-        )
-        b_mass = max((y_surface - gas.Y[fuel_index]) / max(1.0 - y_surface, 1e-300),
-                     0.0)
-        sherwood = 2.0 + (sh0 - 2.0) / self._spray_film_correction(b_mass)
-        evaporation = 0.0
-        if b_mass > 0.0:
-            evaporation = (
-                np.pi * diameter * density * fuel_diff * sherwood * np.log1p(b_mass)
-            )
-
-        cp_fuel = gas.partial_molar_cp[fuel_index] / w_fuel
-        b_heat = cp_fuel * (gas_temperature - droplet_temperature) / max(
-            spray.latent_heat, 1e-300)
-        nusselt = 2.0 + (nu0 - 2.0) / self._spray_film_correction(b_heat)
-        if abs(b_heat) > 1e-8:
-            heat_correction = np.log1p(max(b_heat, -0.95)) / b_heat
-        else:
-            heat_correction = 1.0
-        heat = (
-            2.0 * np.pi * radius * conductivity * nusselt
-            * (gas_temperature - droplet_temperature) * heat_correction
-        )
-        drag = 3.0 * np.pi * viscosity * diameter * axial_slip
-        spread_drag = 3.0 * np.pi * viscosity * diameter * (
-            gas_spread_rate - droplet_spread_rate)
-        return evaporation, heat, drag, spread_drag
-
-    def _integrate_spray_initial_guess(self, include_spread_drag):
-        spray = self.spray
-        z = self.grid
-        n_points = len(z)
-        direction = 1 if self.flame.spray_inlet == "left" else -1
-        start = 0 if direction == 1 else n_points - 1
-        stop = n_points if direction == 1 else -1
-        indices = range(start + direction, stop, direction)
-
-        rho_l = spray.liquid_density
-        mass0 = np.pi / 6.0 * rho_l * spray.diameter**3
-        min_mass = np.pi / 6.0 * rho_l * spray.minimum_droplet_diameter**3
-        if spray.droplet_velocity is None:
-            inlet_speed = max(abs(self.velocity[start]), 1e-6)
-        else:
-            inlet_speed = abs(spray.droplet_velocity)
-        velocity_floor = direction * 1e-6
-
-        mass = np.empty(n_points)
-        droplet_velocity = np.empty(n_points)
-        droplet_temperature = np.empty(n_points)
-        liquid_density = np.empty(n_points)
-        droplet_spread_rate = np.zeros(n_points)
-
-        mass[start] = mass0
-        droplet_velocity[start] = direction * inlet_speed
-        droplet_temperature[start] = spray.liquid_temperature
-        if spray.liquid_mass_density is None:
-            liquid_density[start] = spray.liquid_mass_flux / inlet_speed
-        else:
-            liquid_density[start] = spray.liquid_mass_density
-        droplet_spread_rate[start] = spray.droplet_spread_rate
-
-        dry = False
-        max_step = 1e-6
-        for j in indices:
-            jup = j - direction
-            dz_total = z[j] - z[jup]
-            steps = max(1, int(np.ceil(abs(dz_total) / max_step)))
-            h = dz_total / steps
-            m = mass[jup]
-            ud = droplet_velocity[jup]
-            td = droplet_temperature[jup]
-            rho = liquid_density[jup]
-            vd = droplet_spread_rate[jup]
-
-            for step in range(steps):
-                if dry or m <= min_mass * (1.0 + 1e-8) or rho <= 0.0:
-                    dry = True
-                    m = min_mass
-                    rho = 0.0
-                    td = spray.boiling_temperature
-                    vd = 0.0
-                    break
-
-                frac = (step + 0.5) / steps
-                gas_velocity = self.velocity[jup] + frac * (
-                    self.velocity[j] - self.velocity[jup])
-                gas_spread_rate = self.spread_rate[jup] + frac * (
-                    self.spread_rate[j] - self.spread_rate[jup])
-                gas_temperature = self.T[jup] + frac * (self.T[j] - self.T[jup])
-                gas_y = self.Y[:, jup] + frac * (self.Y[:, j] - self.Y[:, jup])
-                evaporation, heat, drag, spread_drag = self._spray_rates(
-                    m, min(td, spray.boiling_temperature), ud, gas_velocity,
-                    vd, gas_spread_rate, gas_temperature, gas_y)
-
-                inv_ud = 1.0 / ud
-                dm_dz = -evaporation * inv_ud
-                du_dz = drag / max(m, 1e-300) * inv_ud
-                if td >= spray.boiling_temperature:
-                    td = spray.boiling_temperature
-                    dt_dz = 0.0
-                else:
-                    dt_dz = (heat - evaporation * spray.latent_heat) / (
-                        max(m, 1e-300) * spray.liquid_cp) * inv_ud
-                if include_spread_drag:
-                    dspread_dz = (
-                        spread_drag / max(m, 1e-300) - vd * vd
-                    ) * inv_ud
-                else:
-                    dspread_dz = 0.0
-                drho_dz = (
-                    rho / max(m, 1e-300) * dm_dz
-                    - 2.0 * rho * vd * inv_ud
-                    - rho * du_dz * inv_ud
-                )
-
-                m = max(m + h * dm_dz, min_mass)
-                ud += h * du_dz
-                if direction == 1:
-                    ud = max(ud, velocity_floor)
-                else:
-                    ud = min(ud, velocity_floor)
-                td = min(max(td + h * dt_dz, 1.0), spray.boiling_temperature)
-                vd += h * dspread_dz
-                rho = max(rho + h * drho_dz, 0.0)
-
-            mass[j] = m
-            droplet_velocity[j] = ud
-            droplet_temperature[j] = td
-            liquid_density[j] = rho
-            droplet_spread_rate[j] = vd
-
-        return {
-            "droplet-mass": mass,
-            "droplet-velocity": droplet_velocity,
-            "droplet-temperature": droplet_temperature,
-            "liquid-mass-density": liquid_density,
-            "droplet-spread-rate": droplet_spread_rate,
-        }
-
-    def _set_spray_profiles(self, profiles):
-        zrel = (self.grid - self.grid[0]) / (self.grid[-1] - self.grid[0])
-        for name, values in profiles.items():
-            self.flame.set_profile(name, zrel, values)
-
-    def _solve_spray_stage(self, loglevel, refine_grid, description):
+    def _set_gas_initial_guess_from_unsprayed_flame(self, loglevel, refine_grid):
         if loglevel:
-            print(f"\n{' ' + description + ' ':*^78s}")
-        super(CounterflowDiffusionFlame, self).solve(loglevel, refine_grid)
+            print(f"\n{' solving unsprayed gas flame ':*^78s}")
+        gas_flame = CounterflowDiffusionFlame(self.gas, grid=self.grid.copy())
+        gas_flame.flame.P = self.P
+        for source, target in (
+            (self.fuel_inlet, gas_flame.fuel_inlet),
+            (self.oxidizer_inlet, gas_flame.oxidizer_inlet),
+        ):
+            target.T = source.T
+            target.Y = source.Y
+            target.mdot = source.mdot
 
-    def _using_default_refine_criteria(self):
-        criteria = self.get_refine_criteria()
-        return (
-            np.isclose(criteria["ratio"], 10.0)
-            and np.isclose(criteria["slope"], 0.8)
-            and np.isclose(criteria["curve"], 0.8)
-            and np.isclose(criteria["prune"], -0.001)
-        )
+        if not self._using_default_refine_criteria():
+            gas_flame.set_refine_criteria(**self.get_refine_criteria())
+        gas_flame.max_grid_points = self.max_grid_points
+        gas_flame.solve(max(loglevel - 1, 0), refine_grid, auto=True)
+
+        self.flame.grid = gas_flame.grid
+        zrel = (gas_flame.grid - gas_flame.grid[0]) / (
+            gas_flame.grid[-1] - gas_flame.grid[0])
+        for name in ("velocity", "spreadRate", "T", "Lambda"):
+            if name in gas_flame.flame.component_names:
+                self.flame.set_profile(name, zrel, gas_flame.flame.values(name))
+        for spec in self.gas.species_names:
+            self.flame.set_profile(spec, zrel, gas_flame.flame.values(spec))
 
     def _solve_spray_auto(self, loglevel=1, refine_grid=True):
-        self.set_initial_guess(mode="linear")
-
-        if self._using_default_refine_criteria():
-            self.set_refine_criteria(ratio=5.0, slope=0.16, curve=0.24, prune=0.0)
-
+        initial_guess_mode = self._spray_initial_guess_mode()
         final_energy = self.energy_enabled
+        if self._using_default_refine_criteria():
+            if initial_guess_mode == "stoich" and final_energy:
+                self.set_refine_criteria(
+                    ratio=5.0, slope=0.16, curve=0.24, prune=0.0)
+            else:
+                self.set_refine_criteria(
+                    ratio=5.0, slope=0.24, curve=0.32, prune=0.0)
+
+        if initial_guess_mode == "stoich" and final_energy:
+            self._set_gas_initial_guess_from_unsprayed_flame(loglevel, refine_grid)
+            self.spray.set_initial_guess(self.flame)
+        else:
+            self.set_initial_guess(mode=initial_guess_mode)
+
         final_mass = self.flame.gas_phase_spray_mass_source_enabled
         final_species = self.flame.gas_phase_spray_species_source_enabled
         final_momentum = self.flame.gas_phase_spray_momentum_source_enabled
         final_energy_source = self.flame.gas_phase_spray_energy_source_enabled
+        final_evaporation = self.flame.droplet_evaporation_enabled
+        final_heat_transfer = self.flame.droplet_heat_transfer_enabled
         final_axial_drag = self.flame.droplet_axial_drag_enabled
         final_spread_drag = self.flame.droplet_spread_drag_enabled
+        final_axial_drag_multiplier = self.flame.droplet_axial_drag_multiplier
+        final_spread_drag_multiplier = self.flame.droplet_spread_drag_multiplier
+        reacting_energy = initial_guess_mode == "stoich" and final_energy
+        stage_refine = refine_grid and not reacting_energy
 
-        self.energy_enabled = False
+        self.energy_enabled = reacting_energy
         self.flame.gas_phase_spray_sources_enabled = False
+        self.flame.droplet_evaporation_enabled = False
+        self.flame.droplet_heat_transfer_enabled = False
         self.flame.droplet_axial_drag_enabled = False
         self.flame.droplet_spread_drag_enabled = False
-        self._set_spray_profiles(self._integrate_spray_initial_guess(False))
-        self._solve_spray_stage(loglevel, refine_grid, "solving one-way spray without drag")
+        self._solve_spray_stage(loglevel, False, "solving inert droplets")
+
+        if final_evaporation or final_heat_transfer:
+            self._set_spray_profiles(self._integrate_spray_initial_guess(False, False))
+            self.flame.droplet_evaporation_enabled = final_evaporation
+            self.flame.droplet_heat_transfer_enabled = final_heat_transfer
+            self._solve_spray_stage(loglevel, False, "solving one-way spray without drag")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining one-way spray without drag")
 
         if final_axial_drag:
-            self._set_spray_profiles(self._integrate_spray_initial_guess(False))
+            profiles = self._integrate_spray_initial_guess(True, False)
+            self._set_spray_profiles({"droplet-velocity": profiles["droplet-velocity"]})
             self.flame.droplet_axial_drag_enabled = True
-            self._solve_spray_stage(loglevel, False, "solving axial droplet drag")
-            self._solve_spray_stage(loglevel, refine_grid, "refining axial droplet drag")
+            for multiplier in self._spray_multiplier_ramp(final_axial_drag_multiplier):
+                self.flame.droplet_axial_drag_multiplier = multiplier
+                self._solve_spray_stage(
+                    loglevel, False, f"solving axial droplet drag ({multiplier:g})")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining axial droplet drag")
 
         if final_spread_drag:
-            self._set_spray_profiles(self._integrate_spray_initial_guess(True))
             self.flame.droplet_spread_drag_enabled = True
-            self._solve_spray_stage(loglevel, False, "solving droplet spread drag")
-            self._solve_spray_stage(loglevel, refine_grid, "refining droplet spread drag")
+            for multiplier in self._spray_multiplier_ramp(
+                    final_spread_drag_multiplier, gentle=True):
+                self.flame.droplet_spread_drag_multiplier = multiplier
+                min_mass = (
+                    np.pi / 6.0 * self.spray.liquid_density
+                    * self.spray.minimum_droplet_diameter**3
+                )
+                active = (
+                    (self.flame.values("droplet-mass") > min_mass * (1.0 + 1e-8))
+                    & (self.flame.values("liquid-mass-density") > 0.0)
+                )
+                if np.any(active[1:-1]):
+                    profiles = self._integrate_spray_initial_guess(
+                        True, True, spread_drag_multiplier=multiplier)
+                    spread_rate = self.flame.values("droplet-spread-rate").copy()
+                    liquid_density = self.flame.values("liquid-mass-density").copy()
+                    finite = (
+                        active
+                        & np.isfinite(profiles["droplet-spread-rate"])
+                        & np.isfinite(profiles["liquid-mass-density"])
+                    )
+                    spread_rate[finite] = profiles["droplet-spread-rate"][finite]
+                    liquid_density[finite] = profiles["liquid-mass-density"][finite]
+                    self._set_spray_profiles({
+                        "droplet-spread-rate": spread_rate,
+                        "liquid-mass-density": liquid_density,
+                    })
+                else:
+                    self._set_spray_profiles({
+                        "droplet-spread-rate": np.zeros_like(self.grid),
+                    })
+                self._solve_spray_stage(
+                    loglevel, False, f"solving droplet spread drag ({multiplier:g})")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining droplet spread drag")
+
+        solved_energy = reacting_energy
+
+        if refine_grid:
+            self._solve_spray_stage(loglevel, True,
+                                    "refining one-way droplet solution")
 
         if final_mass:
             self.flame.gas_phase_spray_mass_source_enabled = True
             self._solve_spray_stage(loglevel, False, "solving gas mass feedback")
-            self._solve_spray_stage(loglevel, refine_grid, "refining gas mass feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas mass feedback")
         if final_species:
             self.flame.gas_phase_spray_species_source_enabled = True
             self._solve_spray_stage(loglevel, False, "solving gas species feedback")
-            self._solve_spray_stage(loglevel, refine_grid, "refining gas species feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas species feedback")
         if final_momentum:
             self.flame.gas_phase_spray_momentum_source_enabled = True
             self._solve_spray_stage(loglevel, False, "solving gas momentum feedback")
-            self._solve_spray_stage(loglevel, refine_grid, "refining gas momentum feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas momentum feedback")
 
-        if final_energy:
+        if final_energy and not solved_energy:
             self.energy_enabled = True
             self.flame.gas_phase_spray_energy_source_enabled = False
             self._solve_spray_stage(loglevel, False, "solving gas energy equation")
-            self._solve_spray_stage(loglevel, refine_grid, "refining gas energy equation")
-            if final_energy_source:
-                self.flame.gas_phase_spray_energy_source_enabled = True
-                self._solve_spray_stage(loglevel, False, "solving spray energy feedback")
-                self._solve_spray_stage(loglevel, refine_grid, "refining spray energy feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas energy equation")
+            solved_energy = True
+        if solved_energy and final_energy_source:
+            self.flame.gas_phase_spray_energy_source_enabled = True
+            self._solve_spray_stage(loglevel, False, "solving spray energy feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining spray energy feedback")
         else:
-            self.energy_enabled = False
-            self.flame.gas_phase_spray_energy_source_enabled = final_energy_source
+            if not final_energy:
+                self.energy_enabled = False
+                self.flame.gas_phase_spray_energy_source_enabled = final_energy_source
+
+        if reacting_energy and (final_evaporation or final_heat_transfer):
+            self.eval()
+            refresh_spray = (
+                np.max(self.flame.evaporation_rate) <= 0.0
+                and np.min(self.flame.droplet_diameter)
+                <= self.flame.minimum_droplet_diameter * (1.0 + 1e-8)
+            )
+        else:
+            refresh_spray = False
+
+        if refresh_spray:
+            self._set_spray_profiles(self._integrate_spray_initial_guess(
+                final_axial_drag,
+                final_spread_drag,
+                spread_drag_multiplier=final_spread_drag_multiplier,
+            ))
+            self._solve_spray_stage(loglevel, False,
+                                    "refreshing spray trajectory on final gas field")
+
+        if reacting_energy and refine_grid:
+            self._solve_spray_stage(loglevel, True,
+                                    "refining coupled reacting spray flame")
+        elif refine_grid:
+            self._solve_spray_stage(loglevel, True,
+                                    "refining coupled spray solution")
 
     def solve(self, loglevel=1, refine_grid=True, auto=False):
         """
@@ -1701,7 +1917,7 @@ class CounterflowDiffusionFlame(FlameBase):
         return vals
 
 
-class ImpingingJet(FlameBase):
+class ImpingingJet(_SprayAutoSolveMixin, FlameBase):
     """An axisymmetric flow impinging on a surface at normal incidence."""
     __slots__ = ('inlet', 'flame', 'surface', 'spray')
 
@@ -1795,6 +2011,195 @@ class ImpingingJet(FlameBase):
         self.flame.set_profile("spreadRate", locs, [0.0, 0.0])
         if self.spray is not None:
             self.spray.set_initial_guess(self.flame)
+
+    def _set_gas_initial_guess_from_unsprayed_jet(self, loglevel, refine_grid):
+        if loglevel:
+            print(f"\n{' solving unsprayed impinging jet ':*^78s}")
+        gas_jet = ImpingingJet(self.gas, grid=self.grid.copy())
+        gas_jet.flame.P = self.P
+        gas_jet.inlet.T = self.inlet.T
+        gas_jet.inlet.Y = self.inlet.Y
+        gas_jet.inlet.mdot = self.inlet.mdot
+        gas_jet.surface.T = self.surface.T
+
+        if not self._using_default_refine_criteria():
+            gas_jet.set_refine_criteria(**self.get_refine_criteria())
+        gas_jet.max_grid_points = self.max_grid_points
+        gas_jet.set_initial_guess(products="equil")
+        gas_jet.solve(max(loglevel - 1, 0), refine_grid, auto=True)
+
+        self.flame.grid = gas_jet.grid
+        zrel = (gas_jet.grid - gas_jet.grid[0]) / (
+            gas_jet.grid[-1] - gas_jet.grid[0])
+        for name in ("velocity", "spreadRate", "T", "Lambda"):
+            if name in gas_jet.flame.component_names:
+                self.flame.set_profile(name, zrel, gas_jet.flame.values(name))
+        for spec in self.gas.species_names:
+            self.flame.set_profile(spec, zrel, gas_jet.flame.values(spec))
+        self.flame.set_fixed_temp_profile(zrel, gas_jet.T)
+
+    def _solve_spray_auto(self, loglevel=1, refine_grid=True):
+        final_energy = self.energy_enabled
+        if self._using_default_refine_criteria():
+            self.set_refine_criteria(ratio=5.0, slope=0.24, curve=0.32, prune=0.0)
+
+        reacting_energy = False
+        if final_energy:
+            try:
+                self.gas.TPY = self.inlet.T, self.P, self.inlet.Y
+                reference_temperature = max(self.inlet.T, self.surface.T)
+                self.gas.equilibrate("HP")
+                reacting_energy = self.gas.T > reference_temperature + 100.0
+            except CanteraError:
+                reacting_energy = False
+
+        if reacting_energy:
+            self._set_gas_initial_guess_from_unsprayed_jet(loglevel, refine_grid)
+            self.spray.set_initial_guess(self.flame)
+        else:
+            self.set_initial_guess(products="equil" if final_energy else "inlet")
+
+        final_mass = self.flame.gas_phase_spray_mass_source_enabled
+        final_species = self.flame.gas_phase_spray_species_source_enabled
+        final_momentum = self.flame.gas_phase_spray_momentum_source_enabled
+        final_energy_source = self.flame.gas_phase_spray_energy_source_enabled
+        final_evaporation = self.flame.droplet_evaporation_enabled
+        final_heat_transfer = self.flame.droplet_heat_transfer_enabled
+        final_axial_drag = self.flame.droplet_axial_drag_enabled
+        final_spread_drag = self.flame.droplet_spread_drag_enabled
+        final_axial_drag_multiplier = self.flame.droplet_axial_drag_multiplier
+        final_spread_drag_multiplier = self.flame.droplet_spread_drag_multiplier
+        stage_refine = refine_grid and not reacting_energy
+
+        self.energy_enabled = False
+        self.flame.gas_phase_spray_sources_enabled = False
+        self.flame.droplet_evaporation_enabled = False
+        self.flame.droplet_heat_transfer_enabled = False
+        self.flame.droplet_axial_drag_enabled = False
+        self.flame.droplet_spread_drag_enabled = False
+        self._solve_spray_stage(loglevel, False, "solving inert droplets")
+
+        if final_evaporation or final_heat_transfer:
+            self._set_spray_profiles(self._integrate_spray_initial_guess(False, False))
+            self.flame.droplet_evaporation_enabled = final_evaporation
+            self.flame.droplet_heat_transfer_enabled = final_heat_transfer
+            self._solve_spray_stage(loglevel, False, "solving one-way spray without drag")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining one-way spray without drag")
+
+        if final_axial_drag:
+            profiles = self._integrate_spray_initial_guess(True, False)
+            self._set_spray_profiles({"droplet-velocity": profiles["droplet-velocity"]})
+            self.flame.droplet_axial_drag_enabled = True
+            for multiplier in self._spray_multiplier_ramp(final_axial_drag_multiplier):
+                self.flame.droplet_axial_drag_multiplier = multiplier
+                self._solve_spray_stage(
+                    loglevel, False, f"solving axial droplet drag ({multiplier:g})")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining axial droplet drag")
+
+        if final_spread_drag:
+            self.flame.droplet_spread_drag_enabled = True
+            for multiplier in self._spray_multiplier_ramp(
+                    final_spread_drag_multiplier, gentle=True):
+                self.flame.droplet_spread_drag_multiplier = multiplier
+                min_mass = (
+                    np.pi / 6.0 * self.spray.liquid_density
+                    * self.spray.minimum_droplet_diameter**3
+                )
+                active = (
+                    (self.flame.values("droplet-mass") > min_mass * (1.0 + 1e-8))
+                    & (self.flame.values("liquid-mass-density") > 0.0)
+                )
+                if np.any(active[1:-1]):
+                    profiles = self._integrate_spray_initial_guess(
+                        True, True, spread_drag_multiplier=multiplier)
+                    spread_rate = self.flame.values("droplet-spread-rate").copy()
+                    liquid_density = self.flame.values("liquid-mass-density").copy()
+                    finite = (
+                        active
+                        & np.isfinite(profiles["droplet-spread-rate"])
+                        & np.isfinite(profiles["liquid-mass-density"])
+                    )
+                    spread_rate[finite] = profiles["droplet-spread-rate"][finite]
+                    liquid_density[finite] = profiles["liquid-mass-density"][finite]
+                    self._set_spray_profiles({
+                        "droplet-spread-rate": spread_rate,
+                        "liquid-mass-density": liquid_density,
+                    })
+                else:
+                    self._set_spray_profiles({
+                        "droplet-spread-rate": np.zeros_like(self.grid),
+                    })
+                self._solve_spray_stage(
+                    loglevel, False, f"solving droplet spread drag ({multiplier:g})")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining droplet spread drag")
+
+        if stage_refine:
+            self._solve_spray_stage(loglevel, True,
+                                    "refining one-way droplet solution")
+
+        if final_mass:
+            self.flame.gas_phase_spray_mass_source_enabled = True
+            self._solve_spray_stage(loglevel, False, "solving gas mass feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas mass feedback")
+        if final_species:
+            self.flame.gas_phase_spray_species_source_enabled = True
+            self._solve_spray_stage(loglevel, False, "solving gas species feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas species feedback")
+        if final_momentum:
+            self.flame.gas_phase_spray_momentum_source_enabled = True
+            self._solve_spray_stage(loglevel, False, "solving gas momentum feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas momentum feedback")
+
+        if final_energy:
+            self.energy_enabled = True
+            self.flame.gas_phase_spray_energy_source_enabled = False
+            self._solve_spray_stage(loglevel, False, "solving gas energy equation")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining gas energy equation")
+        else:
+            self.energy_enabled = False
+            self.flame.gas_phase_spray_energy_source_enabled = final_energy_source
+        if final_energy and final_energy_source:
+            self.flame.gas_phase_spray_energy_source_enabled = True
+            self._solve_spray_stage(loglevel, False, "solving spray energy feedback")
+            if stage_refine:
+                self._solve_spray_stage(loglevel, True,
+                                        "refining spray energy feedback")
+
+        if refine_grid:
+            self._solve_spray_stage(loglevel, True,
+                                    "refining coupled wall spray solution")
+
+    def solve(self, loglevel=1, refine_grid=True, auto=False):
+        """
+        Solve the problem.
+
+        :param loglevel:
+            integer flag controlling the amount of diagnostic output. Zero
+            suppresses all output, and 5 produces very verbose output.
+        :param refine_grid:
+            if True, enable grid refinement.
+        :param auto:
+            if True and a spray is present, use staged spray source-term
+            continuation before the final coupled solve.
+        """
+        if self.spray is not None and auto:
+            self._solve_spray_auto(loglevel, refine_grid)
+        else:
+            super().solve(loglevel, refine_grid, auto)
 
 
 class CounterflowPremixedFlame(FlameBase):

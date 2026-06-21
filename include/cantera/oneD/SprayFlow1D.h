@@ -360,6 +360,7 @@ protected:
     double dropletVelocityGradientTerm(span<const double> x, size_t j) const;
     double liquidMassFlux(span<const double> x, size_t j) const;
     double minimumDropletMass() const;
+    bool dropletLoadingIsEmpty(span<const double> x, size_t j) const;
     bool dropletIsDry(span<const double> x, size_t j) const;
     void checkDropletReversal(span<const double> x, size_t j) const;
     void updateSpraySources(span<const double> x, size_t jmin, size_t jmax);

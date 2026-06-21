@@ -412,17 +412,84 @@ class TestMonodisperseSpray:
         assert max(abs(sim.flame.droplet_velocity)) > 0.0
         assert max(abs(sim.flame.droplet_spread_rate)) > 0.0
 
-    def test_counterflow_spray_auto_air_air(self):
+    def test_counterflow_right_injection_liquid_continuity(self):
         gas = ct.Solution("h2o2.yaml")
-        gas.TPX = 300.0, ct.one_atm, "O2:0.21, N2:0.79"
         spray = self.make_spray(
-            diameter=100e-6,
+            diameter=1e-3,
             liquid_density=700.0,
             liquid_cp=2500.0,
             latent_heat=1e6,
             boiling_temperature=1000.0,
             liquid_temperature=300.0,
-            liquid_mass_density=1e-10,
+            liquid_mass_density=1e-8,
+            droplet_velocity=0.2,
+        )
+
+        sim = ct.CounterflowDiffusionFlame(
+            gas, width=0.02, spray=spray, spray_inlet="oxidizer"
+        )
+        for inlet in (sim.fuel_inlet, sim.oxidizer_inlet):
+            inlet.T = 300.0
+            inlet.X = "O2:1, AR:3.76"
+            inlet.mdot = 0.05
+        sim.set_initial_guess(mode="linear")
+        sim.energy_enabled = False
+        sim.solve(loglevel=0, refine_grid=False, auto=False)
+
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert np.all(sim.flame.droplet_velocity < 0.0)
+
+        z = sim.grid
+        dz = np.diff(z)
+        liquid_density = sim.flame.liquid_mass_density
+        liquid_flux = liquid_density * sim.flame.droplet_velocity
+        residual = []
+        scale = []
+        for jj in range(1, len(z) - 1):
+            flux_divergence = (liquid_flux[jj + 1] - liquid_flux[jj]) / dz[jj]
+            radial_divergence = (
+                2 * liquid_density[jj] * sim.flame.droplet_spread_rate[jj]
+            )
+            source = sim.flame.evaporation_rate[jj]
+            residual.append(-flux_divergence - radial_divergence - source)
+            scale.append(abs(flux_divergence) + abs(radial_divergence) + abs(source))
+
+        assert np.max(np.abs(residual) / np.maximum(scale, 1e-300)) < 1e-6
+
+    def test_impinging_jet_spray_auto(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "O2:1, AR:3.76"
+        spray = self.make_spray(
+            diameter=1e-3,
+            liquid_density=700.0,
+            liquid_cp=2500.0,
+            latent_heat=1e6,
+            boiling_temperature=1000.0,
+            liquid_temperature=300.0,
+            liquid_mass_density=1e-8,
+            droplet_velocity=0.2,
+        )
+
+        sim = ct.ImpingingJet(gas, width=0.02, spray=spray)
+        sim.inlet.T = 300.0
+        sim.inlet.X = "O2:1, AR:3.76"
+        sim.inlet.mdot = 0.05
+        sim.surface.T = 300.0
+        sim.energy_enabled = False
+        sim.solve(loglevel=0, refine_grid=False, auto=True)
+
+        assert max(sim.flame.evaporation_rate) > 0.0
+        assert max(sim.Y[gas.species_index("H2")]) > 0.0
+        assert sim.flame.gas_phase_spray_sources_enabled
+        assert sim.flame.droplet_drag_enabled
+        assert np.all(np.isfinite(sim.flame.droplet_velocity))
+
+    def test_counterflow_spray_auto_air_air(self):
+        gas = ct.Solution("h2o2.yaml")
+        gas.TPX = 300.0, ct.one_atm, "O2:0.21, N2:0.79"
+        spray = self.make_spray(
+            diameter=20e-6,
+            liquid_mass_density=1e-8,
             droplet_velocity=0.2,
             minimum_droplet_diameter=1e-6,
         )
@@ -439,6 +506,84 @@ class TestMonodisperseSpray:
         assert max(sim.Y[gas.species_index("H2")]) > 0.0
         assert sim.flame.gas_phase_spray_sources_enabled
         assert sim.flame.droplet_drag_enabled
+
+        z = sim.grid
+        j = np.arange(1, len(z) - 1)
+        dz = np.diff(z)
+        rho_u = sim.density * sim.velocity
+        gas_flux_divergence = (rho_u[j + 1] - rho_u[j]) / dz[j]
+        gas_radial_divergence = (
+            sim.density[j + 1] * sim.spread_rate[j + 1]
+            + sim.density[j] * sim.spread_rate[j]
+        )
+        evaporation = sim.flame.evaporation_rate
+        gas_residual = (
+            -gas_flux_divergence - gas_radial_divergence + evaporation[j]
+        )
+        gas_scale = (
+            np.abs(gas_flux_divergence) + np.abs(gas_radial_divergence)
+            + np.abs(evaporation[j])
+        )
+        assert np.max(np.abs(gas_residual) / np.maximum(gas_scale, 1e-300)) < 1e-6
+
+        liquid_density = sim.flame.liquid_mass_density
+        droplet_velocity = sim.flame.droplet_velocity
+        liquid_flux = liquid_density * droplet_velocity
+        droplet_spread_rate = sim.flame.droplet_spread_rate
+        droplet_diameter = sim.flame.droplet_diameter
+        wet = (
+            (liquid_density > np.max(liquid_density) * 1e-12)
+            & (droplet_diameter > sim.flame.minimum_droplet_diameter * (1 + 1e-8))
+        )
+        liquid_residual = []
+        liquid_scale = []
+        for jj in range(1, len(z) - 1):
+            if not wet[jj]:
+                continue
+            if droplet_velocity[jj] > 0:
+                flux_divergence = (liquid_flux[jj] - liquid_flux[jj - 1]) / dz[jj - 1]
+            else:
+                flux_divergence = (liquid_flux[jj + 1] - liquid_flux[jj]) / dz[jj]
+            radial_divergence = 2 * liquid_density[jj] * droplet_spread_rate[jj]
+            liquid_residual.append(
+                -flux_divergence - radial_divergence - evaporation[jj]
+            )
+            liquid_scale.append(
+                abs(flux_divergence) + abs(radial_divergence)
+                + abs(evaporation[jj])
+            )
+        assert liquid_residual
+        assert np.max(
+            np.abs(liquid_residual) / np.maximum(liquid_scale, 1e-300)
+        ) < 1e-5
+
+        droplet_mass = sim.flame.values("droplet-mass")
+        mass_residual = []
+        mass_scale = []
+        for jj in range(1, len(z) - 1):
+            if not wet[jj]:
+                continue
+            jloc = jj if droplet_velocity[jj] > 0 else jj + 1
+            mass_derivative = (
+                (droplet_mass[jloc] - droplet_mass[jloc - 1]) / dz[jloc - 1]
+            )
+            number_density = liquid_density[jj] / droplet_mass[jj]
+            single_droplet_evaporation = evaporation[jj] / number_density
+            advective_term = droplet_velocity[jj] * mass_derivative
+            mass_residual.append(-advective_term - single_droplet_evaporation)
+            mass_scale.append(abs(advective_term) + abs(single_droplet_evaporation))
+        assert mass_residual
+        assert np.max(
+            np.abs(mass_residual) / np.maximum(mass_scale, 1e-300)
+        ) < 1e-5
+
+        dry = (
+            (droplet_diameter <= sim.flame.minimum_droplet_diameter * (1 + 1e-8))
+            | (liquid_density <= np.max(liquid_density) * 1e-30)
+        )
+        assert np.allclose(evaporation[dry], 0.0)
+        assert np.allclose(sim.flame.spray_gas_energy_source[dry], 0.0)
+        assert np.max(np.abs(np.sum(sim.Y, axis=0) - 1.0)) < 1e-12
 
 def check_component_order(fname: str, group: str):
     with fname.open("r", encoding="utf-8") as fid:

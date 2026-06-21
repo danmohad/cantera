@@ -220,10 +220,16 @@ void SprayFlow1D::setSprayBounds()
     setSteadyTolerances(1e-5, 1e-9, dropletSpreadRateIndex());
     setSteadyTolerances(1e-5, 1e-8, dropletTemperatureIndex());
 
-    m_refiner->setActive(liquidMassDensityIndex(), true);
+    // Liquid mass density drops to zero at the numerical dryout cutoff. Let
+    // droplet mass, velocity, temperature, and gas fields drive refinement
+    // rather than chasing this artificial discontinuity.
+    m_refiner->setActive(liquidMassDensityIndex(), false);
     m_refiner->setActive(dropletMassIndex(), true);
     m_refiner->setActive(dropletVelocityIndex(), m_enableDropletAxialDrag);
-    m_refiner->setActive(dropletSpreadRateIndex(), m_enableDropletSpreadDrag);
+    // Droplet spread rate is an auxiliary inlet-marched quantity and is only a
+    // placeholder after dryout. Other droplet fields and gas variables provide
+    // more robust refinement targets for the coupled solution.
+    m_refiner->setActive(dropletSpreadRateIndex(), false);
     m_refiner->setActive(dropletTemperatureIndex(), true);
 }
 
@@ -446,7 +452,7 @@ void SprayFlow1D::updateSpraySources(span<const double> x, size_t jmin, size_t j
 
         double mass = dropletMass(x, j);
         double rhoLiquid = liquidMassDensity(x, j);
-        if (mass <= 0.0 || dropletIsDry(x, j) || rhoLiquid <= 0.0) {
+        if (mass <= 0.0 || dropletIsDry(x, j) || dropletLoadingIsEmpty(x, j)) {
             continue;
         }
 
@@ -590,17 +596,40 @@ double SprayFlow1D::minimumDropletMass() const
 bool SprayFlow1D::dropletIsDry(span<const double> x, size_t j) const
 {
     double minMass = minimumDropletMass();
-    bool hasLiquidInlet = (m_inletLiquidMassDensity != Undef
-                           && m_inletLiquidMassDensity > 0.0)
-        || (m_inletLiquidMassFlux != Undef && m_inletLiquidMassFlux > 0.0);
-    return (hasLiquidInlet && liquidMassDensity(x, j) <= 0.0)
-        || (minMass > 0.0 && dropletMass(x, j) <= minMass * (1.0 + 1e-8));
+    if (minMass <= 0.0) {
+        return false;
+    }
+    double mass = dropletMass(x, j);
+    if (mass <= minMass * (1.0 + 1e-8)) {
+        return true;
+    }
+    if (dropletLoadingIsEmpty(x, j) && m_inletDropletMass != Undef) {
+        double emptyDryMass = std::max(minMass * (1.0 + 1e-8),
+                                       1e-4 * m_inletDropletMass);
+        return mass <= emptyDryMass;
+    }
+    return false;
+}
+
+bool SprayFlow1D::dropletLoadingIsEmpty(span<const double> x, size_t j) const
+{
+    double rhoLiquid = liquidMassDensity(x, j);
+    if (rhoLiquid <= 0.0) {
+        return true;
+    }
+    double reference = 0.0;
+    if (m_inletLiquidMassDensity != Undef && m_inletLiquidMassDensity > 0.0) {
+        reference = m_inletLiquidMassDensity;
+    } else if (m_inletLiquidMassFlux != Undef && m_inletLiquidMassFlux > 0.0) {
+        reference = m_inletLiquidMassFlux;
+    }
+    return reference > 0.0 && rhoLiquid <= 1e-30 * reference;
 }
 
 void SprayFlow1D::checkDropletReversal(span<const double> x, size_t j) const
 {
     if (!m_checkDropletReversal || dropletIsDry(x, j)
-        || liquidMassDensity(x, j) <= 0.0) {
+        || dropletLoadingIsEmpty(x, j)) {
         return;
     }
     double direction = m_inletSide == 0 ? 1.0 : -1.0;
@@ -697,30 +726,60 @@ void SprayFlow1D::evalAdditionalEquations(span<const double> x, span<double> rsd
     size_t j1 = std::min(jmax, m_points-2);
     for (size_t j = j0; j <= j1; j++) {
         if (dropletIsDry(x, j)) {
-            const auto& liquid = m_sprayModel.liquidProperties();
             size_t jup = (m_inletSide == 0) ? j - 1 : j + 1;
             double dryVelocity = (m_isFree && m_freeFlowNoSlip)
                 ? u(x, j) : dropletVelocity(x, jup);
+            // Once droplets reach the cutoff diameter, the dispersed phase is
+            // absent. Keep the conserved dry state fixed, but carry intensive
+            // droplet placeholders from upstream to avoid creating artificial
+            // refinement targets at the dryout front.
             rsd[index(iRho, j)] = liquidMassDensity(x, j);
             diag[index(iRho, j)] = 0;
             rsd[index(iMass, j)] = dropletMass(x, j) - minimumDropletMass();
             diag[index(iMass, j)] = 0;
             rsd[index(iVelocity, j)] = dropletVelocity(x, j) - dryVelocity;
             diag[index(iVelocity, j)] = 0;
-            rsd[index(iSpread, j)] = dropletSpreadRate(x, j);
+            rsd[index(iSpread, j)] =
+                dropletSpreadRate(x, j) - dropletSpreadRate(x, jup);
             diag[index(iSpread, j)] = 0;
             rsd[index(iTemp, j)] = dropletTemperature(x, j)
-                - liquid.boilingTemperature;
+                - dropletTemperature(x, jup);
             diag[index(iTemp, j)] = 0;
             continue;
         }
 
-        double dz = dropletVelocity(x, j) > 0.0 ? m_dz[j-1] : m_dz[j];
-        double upstreamFlux = dropletVelocity(x, j) > 0.0
-            ? liquidMassFlux(x, j-1) : liquidMassFlux(x, j+1);
+        if (dropletLoadingIsEmpty(x, j)) {
+            // With zero number density, droplet intensive variables are
+            // undefined; carry them from upstream without imposing dryout.
+            size_t jup = (m_inletSide == 0) ? j - 1 : j + 1;
+            double emptyVelocity = (m_isFree && m_freeFlowNoSlip)
+                ? u(x, j) : dropletVelocity(x, jup);
+            rsd[index(iRho, j)] = liquidMassDensity(x, j);
+            diag[index(iRho, j)] = 0;
+            rsd[index(iMass, j)] = dropletMass(x, j) - dropletMass(x, jup);
+            diag[index(iMass, j)] = 0;
+            rsd[index(iVelocity, j)] = dropletVelocity(x, j) - emptyVelocity;
+            diag[index(iVelocity, j)] = 0;
+            rsd[index(iSpread, j)] =
+                dropletSpreadRate(x, j) - dropletSpreadRate(x, jup);
+            diag[index(iSpread, j)] = 0;
+            rsd[index(iTemp, j)] =
+                dropletTemperature(x, j) - dropletTemperature(x, jup);
+            diag[index(iTemp, j)] = 0;
+            continue;
+        }
+
+        double fluxDivergence;
+        if (dropletVelocity(x, j) > 0.0) {
+            fluxDivergence = (liquidMassFlux(x, j) - liquidMassFlux(x, j-1))
+                / m_dz[j-1];
+        } else {
+            fluxDivergence = (liquidMassFlux(x, j+1) - liquidMassFlux(x, j))
+                / m_dz[j];
+        }
         double dropletMassSource = m_enableDropletEvaporation
             ? m_sprayMassSource[j] : 0.0;
-        rsd[index(iRho, j)] = -(liquidMassFlux(x, j) - upstreamFlux) / dz
+        rsd[index(iRho, j)] = -fluxDivergence
             - 2.0 * liquidMassDensity(x, j) * dropletSpreadRate(x, j)
             - dropletMassSource
             - rdt * (liquidMassDensity(x, j) - prevSoln(iRho, j));
